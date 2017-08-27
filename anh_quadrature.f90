@@ -24,7 +24,7 @@ CONTAINS
     IMPLICIT NONE
     ! System definition.
     INTEGER norder_v
-    DOUBLE PRECISION, ALLOCATABLE :: vcoeff(:)
+    DOUBLE PRECISION, ALLOCATABLE :: vcoeff_nat(:), vcoeff(:)
     DOUBLE PRECISION omega
     ! Variables defining ground state of Hamiltonian.
     INTEGER norder
@@ -44,30 +44,40 @@ CONTAINS
     CHARACTER(2048) line
     INTEGER i, ierr, ivec
     DOUBLE PRECISION t1, e0vec(0:NITER_CONVERGE-1)
-
-    ! FIXME - ask for V in natural polynomial form, find optimal OMEGA (by some
-    ! criterion) and re-represent in Hermite polynomials internally.
-
-    ! Get scaling factor.
-    write(6,*) 'Enter omega (a.u.):'
-    read(5,*,iostat=ierr) omega
-    if (ierr/=0) call quit()
-    if (omega<=0.d0) call quit('Omega must be positive.')
+    ! Conversion from natural polynomials to Hermite polynomials.
+    DOUBLE PRECISION, ALLOCATABLE :: lu_hmatrix(:,:)
+    INTEGER, ALLOCATABLE :: piv_hmatrix(:)
 
     ! Get V coefficients and norder.
-    write(6,*) 'Enter coefficients of expansion of V(x/sqrt(omega)) in &
-       &Hermite polynomials,'
-    write(6,*)'V(x/sqrt(omega)) = sum_k c_k H_k(x)    (one line):'
-    read(5,'(a)') line
+    write(6,*) 'Enter coefficients c_k of expansion of V(u) in natural powers,'
+    write(6,*)
+    write(6,*) '  V(u) = sum_k=0^n c_k u^k       (a.u., in one line):'
+    write(6,*)
+    read(5,'(a)',iostat=ierr) line
+    if (ierr/=0) call quit()
+    write(6,*)
     norder_v = -1
     do
       read(line,*,iostat=ierr) (t1, i=0,norder_v+1)
       if(ierr/=0)exit
       norder_v = norder_v+1
     enddo
-    if (norder_v<0) call quit('Could not parse coefficients.')
-    allocate(vcoeff(0:norder_v))
-    read(line,*) vcoeff(0:norder_v)
+    if (norder_v<0) call quit ('Could not parse coefficients.')
+    if (mod(norder_v,2)/=0) call quit ('Leading term of V(u) must be an even &
+      &power.')
+    allocate(vcoeff_nat(0:norder_v))
+    read(line,*) vcoeff_nat(0:norder_v)
+    if (vcoeff_nat(norder_v)<epsilon(1.d0)) &
+       &call quit ('Leading term of V(u) must have a positive coefficient.')
+    omega = (2.d0*vcoeff_nat(norder_v))**(2.d0/dble(norder_v))
+    write(6,*) 'Omega (a.u.) = ', omega
+
+    ! Convert V to Hermite polynomials.
+    allocate(lu_hmatrix(0:norder_v,0:norder_v), piv_hmatrix(0:norder_v), &
+       &vcoeff(0:norder_v))
+    call LU_decom_hermite_matrix (norder_v, lu_hmatrix, piv_hmatrix)
+    call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
+       &(/ (vcoeff_nat(i)/sqrt(omega)**dble(i), i=0,norder_v) /), vcoeff)
 
     ! Get good approximation to ground state wave function.
     e0vec(0:NITER_CONVERGE-1) = (/ (dble(i)*1.d7, i=1,NITER_CONVERGE) /)
@@ -88,11 +98,11 @@ CONTAINS
     ! Report ground-state energy.
     write(6,*) 'Ground state energy converges at expansion order '//&
        &trim(i2s(norder))//':'
-    write(6,*) '  E0 = ', e0
+    write(6,*) '  E0 (a.u.) = ', e0
 
     ! Call again to make plot.
     call get_ground_state (norder, norder_v, vcoeff, omega, e0, orbcoeff, &
-       &nplot=5)
+       &nplot=10)
 
     ! Solve for the quadrature grid.
     ! FIXME - write
@@ -181,14 +191,14 @@ CONTAINS
     lapack_liwork = -1
     call dsyevd ('V', 'U', norder+1, hmatrix, norder+1, alpha, &
        &lapack_work, lapack_lwork, lapack_iwork, lapack_liwork, ierr)
-    if (ierr/=0) call quit ('LAPACK error '//trim(i2s(ierr))//'.')
+    if (ierr/=0) call quit ('DSYEVD error '//trim(i2s(ierr))//'.')
     lapack_lwork = nint(lapack_work(1))
     lapack_liwork = lapack_iwork(1)
     deallocate(lapack_work, lapack_iwork)
     allocate(lapack_work(lapack_lwork), lapack_iwork(lapack_liwork))
     call dsyevd ('V', 'U', norder+1, hmatrix, norder+1, alpha, &
        &lapack_work, lapack_lwork, lapack_iwork, lapack_liwork, ierr)
-    if (ierr/=0) call quit ('LAPACK error '//trim(i2s(ierr))//'.')
+    if (ierr/=0) call quit ('DSYEVD error '//trim(i2s(ierr))//'.')
     deallocate(lapack_work, lapack_iwork)
 
     ! Return ground-state components.
@@ -314,6 +324,60 @@ CONTAINS
       h(i) = t0
     enddo ! i
   END SUBROUTINE eval_hermite_poly_norm
+
+
+  SUBROUTINE LU_decom_hermite_matrix (norder, lu_hmatrix, piv_hmatrix)
+    !-----------------------------------------------------------------!
+    ! Returns the LU decomposition of the matrix of coefficients of   !
+    ! natural powers in Hermite polynomials up to order NORDER, which !
+    ! can then be used to express natural polynomials in Hermite      !
+    ! polynomials.                                                    !
+    !-----------------------------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: norder
+    DOUBLE PRECISION, INTENT(inout) :: lu_hmatrix(0:norder,0:norder)
+    INTEGER, INTENT(inout) :: piv_hmatrix(0:norder)
+    ! Numerical constants.
+    DOUBLE PRECISION, PARAMETER :: log2 = log(2.d0)
+    ! Misc local variables.
+    DOUBLE PRECISION t1
+    INTEGER i, j, isgn, ierr
+
+    ! Build matrix of coefficients of H_i as a linear combination of natural
+    ! powers.
+    do i = 0, norder
+      isgn = 1
+      do j = i, 0, -2
+        t1 = eval_log_fact(i) - eval_log_fact(j) - eval_log_fact(i/2-j/2)
+        lu_hmatrix(j,i) = dble(isgn) * exp(t1+dble(j)*log2)
+        isgn = -isgn
+      enddo ! j
+    enddo ! i
+
+    ! LU-decompose the matrix.
+    call dgetrf (norder+1, norder+1, lu_hmatrix, norder+1, piv_hmatrix, ierr)
+    if (ierr/=0) call quit ('DGETRF error '//trim(i2s(ierr))//'.')
+
+  END SUBROUTINE LU_decom_hermite_matrix
+
+
+  SUBROUTINE convert_natpoly_to_hermite (norder, lu_hmatrix, piv_hmatrix, &
+     &pcoeff, hcoeff)
+    !----------------------------------------------------------!
+    ! Convert a polynomial of coefficients PCOEFF(0:NORDER) to !
+    ! a Hermite polynomial of coefficients HCOEFF(0:NORDER).   !
+    !----------------------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: norder, piv_hmatrix(0:norder)
+    DOUBLE PRECISION, INTENT(in) :: lu_hmatrix(0:norder,0:norder), &
+       &pcoeff(0:norder)
+    DOUBLE PRECISION, INTENT(inout) :: hcoeff(0:norder)
+    INTEGER ierr
+    hcoeff(0:norder) = pcoeff(0:norder)
+    call dgetrs ('N', norder+1, 1, lu_hmatrix, norder+1, piv_hmatrix, hcoeff, &
+       &norder+1, ierr)
+    if (ierr/=0) call quit ('DGETRS error '//trim(i2s(ierr))//'.')
+  END SUBROUTINE convert_natpoly_to_hermite
 
 
   ! String utilities.
