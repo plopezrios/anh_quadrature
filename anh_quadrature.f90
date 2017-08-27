@@ -25,12 +25,13 @@ CONTAINS
     ! System definition.
     INTEGER norder_v
     DOUBLE PRECISION, ALLOCATABLE :: vcoeff(:)
-    DOUBLE PRECISION omega, inv_sqrt_omega
+    DOUBLE PRECISION omega
     ! Variables defining ground state of Hamiltonian.
     INTEGER norder
     DOUBLE PRECISION e0
     DOUBLE PRECISION, ALLOCATABLE :: orbcoeff(:)
     ! Maximum expansion order.
+    ! FIXME - LAPACK dsyev* routines hang at norder=202.
     INTEGER, PARAMETER :: MAX_NORDER = 200
     ! The wave function converges at a given expansion order if its
     ! variational energy is within relative REL_TOL or absolute tolerance
@@ -39,17 +40,10 @@ CONTAINS
     INTEGER, PARAMETER :: NITER_CONVERGE = 6
     DOUBLE PRECISION, PARAMETER :: REL_TOL = sqrt(epsilon(1.d0))
     DOUBLE PRECISION, PARAMETER :: ABS_TOL = 1.d-6
-    ! Variables for plotting.
-    DOUBLE PRECISION t1, orbnorm
-    DOUBLE PRECISION, ALLOCATABLE :: vcoeff_unnorm(:), hbasis(:)
-    DOUBLE PRECISION u, x, vu, psiu
-    ! Numerical constants.
-    DOUBLE PRECISION, PARAMETER :: log2 = log(2.d0)
-    DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
     ! Mist local variables.
     CHARACTER(2048) line
     INTEGER i, ierr, ivec
-    DOUBLE PRECISION e0vec(0:NITER_CONVERGE-1)
+    DOUBLE PRECISION t1, e0vec(0:NITER_CONVERGE-1)
 
     ! FIXME - ask for V in natural polynomial form, find optimal OMEGA (by some
     ! criterion) and re-represent in Hermite polynomials internally.
@@ -59,7 +53,6 @@ CONTAINS
     read(5,*,iostat=ierr) omega
     if (ierr/=0) call quit()
     if (omega<=0.d0) call quit('Omega must be positive.')
-    inv_sqrt_omega = 1.d0/sqrt(omega)
 
     ! Get V coefficients and norder.
     write(6,*) 'Enter coefficients of expansion of V(x/sqrt(omega)) in &
@@ -77,7 +70,6 @@ CONTAINS
     read(line,*) vcoeff(0:norder_v)
 
     ! Get good approximation to ground state wave function.
-    ! FIXME/wtf - all LAPACK routines hang at norder=202 regardless of vcoeff
     e0vec(0:NITER_CONVERGE-1) = (/ (dble(i)*1.d7, i=1,NITER_CONVERGE) /)
     ivec = 0
     do norder = max(norder_v,2), MAX_NORDER
@@ -98,22 +90,9 @@ CONTAINS
        &trim(i2s(norder))//':'
     write(6,*) '  E0 = ', e0
 
-    ! Plot V(x) and Psi(x).
-    allocate (hbasis(0:norder), vcoeff_unnorm(0:norder_v))
-    orbnorm = (omega/pi)**0.25d0
-    vcoeff_unnorm(0:norder_v) = &
-       &(/ ( vcoeff(i) * exp( 0.5d0 * (eval_log_fact(i)+dble(i)*log2) ), &
-       &     i=0,norder_v ) /)
-    do i = -100, 100
-      x = dble(i)/dble(100) * 5.d0
-      u = x*inv_sqrt_omega
-      call eval_hermite_poly_norm (norder, x, hbasis)
-      vu = sum(vcoeff_unnorm(0:norder_v)*hbasis(0:norder_v))
-      t1 = orbnorm*exp(-0.5d0*x*x)
-      psiu = t1*sum(orbcoeff(0:norder)*hbasis(0:norder))
-      write(11,*) u, vu, psiu
-    enddo ! i
-    deallocate (hbasis, vcoeff_unnorm)
+    ! Call again to make plot.
+    call get_ground_state (norder, norder_v, vcoeff, omega, e0, orbcoeff, &
+       &nplot=5)
 
     ! Solve for the quadrature grid.
     ! FIXME - write
@@ -121,7 +100,8 @@ CONTAINS
   END SUBROUTINE main
 
 
-  SUBROUTINE get_ground_state (norder, norder_v, vcoeff, omega, e0, orbcoeff)
+  SUBROUTINE get_ground_state (norder, norder_v, vcoeff, omega, e0, orbcoeff, &
+     &nplot)
     !---------------------------------------------------------!
     ! Given a one-dimensional (anharmonic) potential,         !
     !                                                         !
@@ -150,6 +130,7 @@ CONTAINS
     INTEGER, INTENT(in) :: norder, norder_v
     DOUBLE PRECISION, INTENT(in) :: vcoeff(0:norder_v), omega
     DOUBLE PRECISION, INTENT(inout) :: e0, orbcoeff(0:norder)
+    INTEGER, INTENT(in), OPTIONAL :: nplot
     ! Eigenproblem arrays.
     DOUBLE PRECISION alpha(0:norder), hmatrix(0:norder,0:norder)
     ! Buffer for logarithms of factorials.
@@ -158,9 +139,20 @@ CONTAINS
     DOUBLE PRECISION, ALLOCATABLE :: lapack_work(:)
     INTEGER, ALLOCATABLE :: lapack_iwork(:)
     INTEGER lapack_lwork, lapack_liwork
+    ! Variables for plotting.
+    DOUBLE PRECISION orbnorm, inv_sqrt_omega
+    DOUBLE PRECISION, ALLOCATABLE :: vcoeff_unnorm(:), hbasis(:)
+    DOUBLE PRECISION u, x, vu, psiu
+    ! Parameters.
+    DOUBLE PRECISION, PARAMETER :: PLOT_ORB_SCALE_FACTOR = 1.d0
+    DOUBLE PRECISION, PARAMETER :: PLOT_MAX_X = 3.d0 ! on either side of zero
+    INTEGER, PARAMETER :: PLOT_NPOINT = 100 ! on either side of zero
+    ! Numerical constants.
+    DOUBLE PRECISION, PARAMETER :: log2 = log(2.d0)
+    DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
     ! Misc local variables.
+    INTEGER i, j, iplot, ierr
     DOUBLE PRECISION t1
-    INTEGER i, j, ierr
 
     ! Subtract harmonic potential from vcoeff and store coeffs in alpha.
     alpha = 0.d0
@@ -198,14 +190,51 @@ CONTAINS
        &lapack_work, lapack_lwork, lapack_iwork, lapack_liwork, ierr)
     if (ierr/=0) call quit ('LAPACK error '//trim(i2s(ierr))//'.')
     deallocate(lapack_work, lapack_iwork)
-    orbcoeff(0:norder) = hmatrix(0:norder,0)
 
     ! Return ground-state components.
+    ! FIXME - if ground state is degenerate, how do we choose which
+    ! eigenstate to return?
     e0 = alpha(0)
+    orbcoeff(0:norder) = hmatrix(0:norder,0)
 
     ! Normalize coefficients so L2 norm is 1.
     t1 = 1.d0/sqrt(sum(orbcoeff(0:norder)**2))
     orbcoeff(0:norder) = t1*orbcoeff(0:norder)
+
+    ! Optionally, plot potential and first NPLOT eigenstates in xmgrace format
+    ! to Fortran unit 11.
+    if (present(nplot)) then
+      inv_sqrt_omega = 1.d0/omega
+      allocate (hbasis(0:norder), vcoeff_unnorm(0:norder_v))
+      ! Plot V(x).
+      vcoeff_unnorm(0:norder_v) = &
+         &(/ ( vcoeff(i) * exp( 0.5d0 * (eval_log_fact(i)+dble(i)*log2) ), &
+         &     i=0,norder_v ) /)
+      do i = -PLOT_NPOINT, PLOT_NPOINT
+        x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
+        u = x*inv_sqrt_omega
+        call eval_hermite_poly_norm (norder, x, hbasis)
+        vu = sum(vcoeff_unnorm(0:norder_v)*hbasis(0:norder_v))
+        write(11,*) u, vu
+      enddo ! i
+      ! Plot Psi_n(x).
+      do iplot = 0, min(norder,nplot)
+        orbnorm = (omega/pi)**0.25d0 / sqrt(sum(hmatrix(0:norder,iplot)**2))
+        write(11,'(a)') '&'
+        write(11,*) -PLOT_MAX_X, alpha(iplot)
+        write(11,*) PLOT_MAX_X, alpha(iplot)
+        write(11,'(a)') '&'
+        do i = -PLOT_NPOINT, PLOT_NPOINT
+          x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
+          u = x*inv_sqrt_omega
+          call eval_hermite_poly_norm (norder, x, hbasis)
+          t1 = orbnorm*exp(-0.5d0*x*x)
+          psiu = t1*sum(hmatrix(0:norder,iplot)*hbasis(0:norder))
+          write(11,*) u, alpha(iplot)+PLOT_ORB_SCALE_FACTOR*psiu
+        enddo ! i
+      enddo ! iplot
+      deallocate (hbasis, vcoeff_unnorm)
+    endif
 
   END SUBROUTINE get_ground_state
 
