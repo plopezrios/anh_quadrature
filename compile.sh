@@ -49,5 +49,7 @@ mpnagfor*)
 esac
 
 # Compile.
-$f90 $opts -o anh_quadrature anh_quadrature.f90 -llapack 2>&1
+$f90 $opts -c nl2sol.f90 >& /dev/null &&\
+  $f90 $opts -c lsf.f90 2>&1 &&\
+  $f90 $opts -o anh_quadrature anh_quadrature.f90 lsf.o nl2sol.o -llapack 2>&1
 rm -f *.mod *.o

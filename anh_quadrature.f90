@@ -42,10 +42,12 @@ CONTAINS
     DOUBLE PRECISION, PARAMETER :: REL_TOL = sqrt(epsilon(1.d0))
     DOUBLE PRECISION, PARAMETER :: ABS_TOL = 1.d-6
     ! Variables for quadrature grid.
+    INTEGER ngrid
     DOUBLE PRECISION, ALLOCATABLE :: xpower_expval(:)
+    DOUBLE PRECISION, ALLOCATABLE :: grid_x(:), grid_p(:)
     ! Mist local variables.
     CHARACTER(2048) line
-    INTEGER i, ivec, iexp, ierr
+    INTEGER i, ivec, iexp, igrid, ierr
     DOUBLE PRECISION t1, inv_sqrt_omega, e0vec(0:NITER_CONVERGE-1)
 
     ! Get V coefficients and norder.
@@ -114,16 +116,28 @@ CONTAINS
        &trim(i2s(norder))//'.'
     write(6,*) 'E0 (non-dim) = ', e0
     write(6,*) 'E0 (a.u.)    = ', e0*omega
+    write(6,*)
 
-    ! Evaluate expectation values of <x^i>.
-    allocate(xpower_expval(0:20))
-    do iexp = 0, 20
-      xpower_expval(iexp) = eval_xpower_expval (norder, orbcoeff, iexp)
-      write(6,*) '<x^'//trim(i2s(iexp))//'> = ', xpower_expval(iexp)
-    enddo ! iexp
-
-    ! Solve for the quadrature grid.
-    ! FIXME - write
+    ! Loop over quadrature grid sizes.
+    do ngrid = 2, 10
+      allocate(xpower_expval(0:2*ngrid-1), grid_x(ngrid), grid_P(ngrid))
+      ! Evaluate expectation values of <x^i>.
+      do iexp = 0, 2*ngrid-1
+        xpower_expval(iexp) = eval_xpower_expval (norder, orbcoeff, iexp)
+      enddo ! iexp
+      ! Solve for the quadrature grid.
+      write(6,*)'Grid size '//trim(i2s(ngrid))//':'
+      call solve_grid_nl2sol (ngrid, xpower_expval, grid_x, grid_P)
+      !call solve_grid_newton (ngrid, xpower_expval, grid_x, grid_P)
+      ! Report.
+      do igrid = 1, ngrid
+        write(6,*)'  Grid point #'//trim(i2s(igrid))//': x, P = ', &
+           &grid_x(igrid), grid_P(igrid)
+      enddo ! igrid
+      write(6,*)
+      ! Clean up.
+      deallocate(xpower_expval, grid_x, grid_P)
+    enddo ! ngrid
 
   END SUBROUTINE main
 
@@ -311,8 +325,148 @@ CONTAINS
   END FUNCTION eval_xpower_expval
 
 
+  SUBROUTINE solve_grid_nl2sol (ngrid, xpower_expval, grid_x, grid_P)
+    !------------------------------------------------------------!
+    ! Given <x^n> for n=0:2*NGRID-1, solve for the parameters of !
+    ! the NGRID-point quadrature grid using Newton's method.     !
+    !------------------------------------------------------------!
+    USE lsf, ONLY : lsf_res, lsf_xpower_expval
+    USE toms573, ONLY : nl2sno, dfault
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: ngrid
+    DOUBLE PRECISION, INTENT(in) :: xpower_expval(0:2*ngrid-1)
+    DOUBLE PRECISION, INTENT(inout) :: grid_x(ngrid), grid_P(ngrid)
+    ! NL2SOL work arrays.
+    INTEGER, ALLOCATABLE :: iv_nl2sol(:)
+    DOUBLE PRECISION, ALLOCATABLE :: v_nl2sol(:)
+    ! Misc local variables.
+    DOUBLE PRECISION param(2*ngrid)
+    INTEGER i, n
+
+    ! Param vector size.
+    n = 2*ngrid
+    allocate(lsf_xpower_expval(0:n-1))
+    lsf_xpower_expval = xpower_expval
+
+    ! Initialize to something sensible.
+    grid_x(1:ngrid) = (/ ( -0.5d0*dble(ngrid-1) + dble(i-1), i=1,ngrid) /)
+    grid_P = exp(-grid_x**2)
+    grid_P = grid_P/sum(grid_P)
+
+    ! Allocate NL2SOL work arrays.
+    allocate (iv_nl2sol(60+n), v_nl2sol(93+n*(n+3)+n*(3*n+33)/2))
+    iv_nl2sol=0
+    v_nl2sol=0.d0
+
+    ! Initialize NL2SOL.
+    call dfault(iv_nl2sol,v_nl2sol)
+    iv_nl2sol(14:15)=0   ! suppress covariance matrix evaluation and ouput
+    iv_nl2sol(17)=100000 ! maximum number of function evaluations
+    iv_nl2sol(18)=100000 ! maximum number of iterations
+    iv_nl2sol(19:20)=0   ! suppress per-iteration output
+    iv_nl2sol(21)=-1     ! I/O unit (suppress all output)
+    iv_nl2sol(22:24)=0   ! suppress initial and final output
+
+    ! Call nl2sol.
+    param(1:ngrid) = grid_x
+    param(ngrid+1:2*ngrid) = grid_P
+    call nl2sno(n,n,param,lsf_res,iv_nl2sol,v_nl2sol)
+    grid_x = param(1:ngrid)
+    grid_P = param(ngrid+1:2*ngrid)
+
+    deallocate(lsf_xpower_expval)
+
+  END SUBROUTINE solve_grid_nl2sol
+
+
+  SUBROUTINE solve_grid_newton (ngrid, xpower_expval, grid_x, grid_P)
+    !------------------------------------------------------------!
+    ! Given <x^n> for n=0:2*NGRID-1, solve for the parameters of !
+    ! the NGRID-point quadrature grid using Newton's method.     !
+    !------------------------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: ngrid
+    DOUBLE PRECISION, INTENT(in) :: xpower_expval(0:2*ngrid-1)
+    DOUBLE PRECISION, INTENT(inout) :: grid_x(ngrid), grid_P(ngrid)
+    ! Maximum number of Nweton's method iterations to attempt.
+    INTEGER, PARAMETER :: MAX_ITER = 50
+    LOGICAL, PARAMETER :: VERBOSE = .true.
+    ! Misc local variables.
+    DOUBLE PRECISION fvec(2*ngrid), Jmat(2*ngrid,2*ngrid), &
+       &t1, lambda, grid_P_test(ngrid), grid_x_test(ngrid)
+    INTEGER i, iter, piv(2*ngrid), ierr
+
+    ! Initialize to something sensible.
+    grid_x(1:ngrid) = (/ ( -0.5d0*dble(ngrid-1) + dble(i-1), i=1,ngrid) /)
+    grid_P = exp(-grid_x**2)
+    grid_P = grid_P/sum(grid_P)
+
+    ! Loop over Newton's method iterations.
+    do iter = 1, MAX_ITER
+
+      ! Report.
+      if (VERBOSE) then
+        write(6,*) '  Before iteration '//trim(i2s(iter))//':'
+        do i = 1, ngrid
+          write(6,*)'    Grid point #'//trim(i2s(i))//': x, P = ', &
+             &grid_x(i), grid_P(i)
+        enddo ! i
+      endif ! VERBOSE
+
+      ! Evaluate RHS of equations.
+      fvec = (/ ( sum(grid_P(1:ngrid)*grid_x(1:ngrid)**dble(i-1)) - &
+         &        xpower_expval(i-1), i=1,2*ngrid ) /)
+
+      ! Evaluate Jacobian.
+      Jmat = 0.d0
+      Jmat(1,ngrid+1:2*ngrid) = 1.d0
+      Jmat(2,1:ngrid) = grid_P(1:ngrid)
+      Jmat(2,ngrid+1:2*ngrid) = grid_x(1:ngrid)
+      do i = 3, 2*ngrid
+        Jmat(i,1:ngrid) = dble(i-1)*grid_P(1:ngrid)*grid_x(1:ngrid)**dble(i-2)
+        Jmat(i,ngrid+1:2*ngrid) = grid_x(1:ngrid)**dble(i-1)
+      enddo ! i
+
+      ! Obtain Newton's method step.
+      call dgetrf (2*ngrid, 2*ngrid, Jmat, 2*ngrid, piv, ierr)
+      if (ierr/=0) call quit ('DGETRF error '//trim(i2s(ierr))//'.')
+      call dgetrs ('N', 2*ngrid, 1, Jmat, 2*ngrid, piv, fvec, 2*ngrid, ierr)
+      if (ierr/=0) call quit ('DGETRS error '//trim(i2s(ierr))//'.')
+
+      ! Apply step.
+      lambda = 1.d0
+      do
+        grid_P_test = grid_P - lambda*fvec(ngrid+1:2*ngrid)
+        grid_x_test = grid_x - lambda*fvec(1:ngrid)
+        if (all(grid_P_test>=0.d0.and.grid_P_test<=1.d0) .and. &
+         &all(grid_x_test(1:ngrid-1)<grid_x_test(2:ngrid)-0.1d0)) exit
+        lambda = 0.9d0*lambda
+      enddo
+      fvec = lambda*fvec
+      grid_x = grid_x - fvec(1:ngrid)
+      grid_P = grid_P - fvec(ngrid+1:2*ngrid)
+
+      ! Check convergence.
+      t1 = sqrt(sum(fvec**2))
+      if (VERBOSE) then
+        write(6,*) '  Iteration '//trim(i2s(iter))//':'
+        write(6,*) '    Lambda    = ', lambda
+        write(6,*) '    Disp norm = ', t1
+        do i = 1, ngrid
+          write(6,*)'    Grid point #'//trim(i2s(i))//': x, P = ', &
+             &grid_x(i), grid_P(i)
+        enddo ! i
+      endif ! VERBOSE
+      if (t1<1.d-10) exit
+
+    enddo
+
+  END SUBROUTINE solve_grid_newton
+
+
   ! Hermite polynomial tools.  NB, we use "normalized" Hermite polynomials,
   ! N_n(x) = pi^-1/4 2^-n/2 (n!)^-1/2 H_n(x).
+
 
   DOUBLE PRECISION FUNCTION eval_Gamma (i, j, k, log_fact)
     !--------------------------------------------------------------!
