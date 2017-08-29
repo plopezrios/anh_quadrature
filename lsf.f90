@@ -2,7 +2,8 @@ MODULE lsf
   IMPLICIT NONE
   PRIVATE
   PUBLIC lsf_res
-  PUBLIC lsf_xpower_expval
+  PUBLIC lsf_xpower_expval, lsf_xscale
+  DOUBLE PRECISION :: lsf_xscale = 1.d0
   DOUBLE PRECISION, ALLOCATABLE :: lsf_xpower_expval(:)
 
 CONTAINS
@@ -33,7 +34,8 @@ CONTAINS
       return
     endif
     res(1:nxy) = (/ ( sum( grid_P*grid_x**dble(i-1) ) - &
-       &              lsf_xpower_expval(i-1), i=1,nxy ) /)
+       &              lsf_xpower_expval(i-1)/lsf_xscale**dble(i-1), &
+       &              i=1,nxy ) /)
 
   END SUBROUTINE lsf_res
 
