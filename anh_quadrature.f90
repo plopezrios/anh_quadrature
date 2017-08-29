@@ -132,10 +132,17 @@ CONTAINS
       !call solve_grid_newton (ngrid, xpower_expval, norder, orbcoeff, grid_x, &
       !   &grid_P)
       ! Report.
+      write(12,*)grid_x(1)-1.d0, dble(ngrid-2)
       do igrid = 1, ngrid
         write(6,*)'  Grid point #'//trim(i2s(igrid))//': x, P = ', &
            &grid_x(igrid), grid_P(igrid)
+        write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2)
+        write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2) + grid_P(igrid)
+        write(12,*) grid_x(igrid)+0.1d0, dble(ngrid-2) + grid_P(igrid)
+        write(12,*) grid_x(igrid)+0.1d0, dble(ngrid-2)
       enddo ! igrid
+      write(12,*)grid_x(ngrid)+1.d0, dble(ngrid-2)
+      write(12,'(a)')'&'
       write(6,*)
       ! Clean up.
       deallocate(xpower_expval, grid_x, grid_P)
