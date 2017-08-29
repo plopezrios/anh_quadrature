@@ -26,27 +26,27 @@ CONTAINS
     INTEGER norder_v
     DOUBLE PRECISION, ALLOCATABLE :: vcoeff_nat(:), vcoeff(:)
     DOUBLE PRECISION omega
+    ! Conversion from natural polynomials to Hermite polynomials.
+    DOUBLE PRECISION, ALLOCATABLE :: lu_hmatrix(:,:)
+    INTEGER, ALLOCATABLE :: piv_hmatrix(:)
     ! Variables defining ground state of Hamiltonian.
     INTEGER norder
     DOUBLE PRECISION e0
     DOUBLE PRECISION, ALLOCATABLE :: orbcoeff(:)
-    ! Maximum expansion order.
-    ! FIXME - LAPACK dsyev* routines hang at norder=202.
-    INTEGER, PARAMETER :: MAX_NORDER = 200
     ! The wave function converges at a given expansion order if its
     ! variational energy is within relative REL_TOL or absolute tolerance
     ! ABS_TOL of all of the variational energies obtained with the previous
     ! NITER_CONVERGE expansion orders.
+    INTEGER, PARAMETER :: MAX_NORDER = 200 ! FIXME - dsyev* hang at norder=202
     INTEGER, PARAMETER :: NITER_CONVERGE = 6
     DOUBLE PRECISION, PARAMETER :: REL_TOL = sqrt(epsilon(1.d0))
     DOUBLE PRECISION, PARAMETER :: ABS_TOL = 1.d-6
+    ! Variables for quadrature grid.
+    DOUBLE PRECISION, ALLOCATABLE :: xpower_expval(:)
     ! Mist local variables.
     CHARACTER(2048) line
-    INTEGER i, ierr, ivec
-    DOUBLE PRECISION t1, e0vec(0:NITER_CONVERGE-1)
-    ! Conversion from natural polynomials to Hermite polynomials.
-    DOUBLE PRECISION, ALLOCATABLE :: lu_hmatrix(:,:)
-    INTEGER, ALLOCATABLE :: piv_hmatrix(:)
+    INTEGER i, ivec, iexp, ierr
+    DOUBLE PRECISION t1, inv_sqrt_omega, e0vec(0:NITER_CONVERGE-1)
 
     ! Get V coefficients and norder.
     write(6,*) 'Enter coefficients c_k of expansion of V(u) in natural powers,'
@@ -69,40 +69,58 @@ CONTAINS
     read(line,*) vcoeff_nat(0:norder_v)
     if (vcoeff_nat(norder_v)<epsilon(1.d0)) &
        &call quit ('Leading term of V(u) must have a positive coefficient.')
-    omega = (2.d0*vcoeff_nat(norder_v))**(2.d0/dble(norder_v))
+
+    ! We work in a dimensionless scale where x = sqrt(omega)*u and energies
+    ! are e = E/omega.
+
+    ! Obtain omega so that:
+    ! * Scaling a potential V(u) by a multiplicative constant results in the
+    !   same dimensionless potential v(x).
+    ! * For a second order potential, omega is the frequency of the harmonic
+    !   oscillator.
+    omega = sqrt(2.d0)*vcoeff_nat(norder_v)**(2.d0/dble(norder_v+2))
+    inv_sqrt_omega = 1.d0/sqrt(omega)
     write(6,*) 'Omega (a.u.) = ', omega
 
-    ! Convert V to Hermite polynomials.
+    ! Convert potential to dimensionless scale, and expand v(x) in normalized
+    ! Hermite polynomials.
+    vcoeff_nat = (/ (vcoeff_nat(i)*inv_sqrt_omega**dble(i+2), i=0,norder_v) /)
     allocate(lu_hmatrix(0:norder_v,0:norder_v), piv_hmatrix(0:norder_v), &
        &vcoeff(0:norder_v))
-    call LU_decom_hermite_matrix (norder_v, lu_hmatrix, piv_hmatrix)
+    call lu_decom_hermite_matrix (norder_v, lu_hmatrix, piv_hmatrix)
     call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
-       &(/ (vcoeff_nat(i)/sqrt(omega)**dble(i), i=0,norder_v) /), vcoeff)
+       &vcoeff_nat, vcoeff)
 
-    ! Get good approximation to ground state wave function.
+    ! Converge trial ground-state wave function.
     e0vec(0:NITER_CONVERGE-1) = (/ (dble(i)*1.d7, i=1,NITER_CONVERGE) /)
     ivec = 0
     do norder = max(norder_v,2), MAX_NORDER
       if (allocated(orbcoeff)) deallocate (orbcoeff)
       allocate (orbcoeff(0:norder))
       orbcoeff = 0.d0
-      call get_ground_state (norder, norder_v, vcoeff, omega, e0, orbcoeff)
-      if (all(abs(e0vec-e0)<REL_TOL*abs(e0))) exit
-      if (all(abs(e0vec-e0)<ABS_TOL)) exit
+      call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff)
       ivec = modulo(ivec-1,NITER_CONVERGE)
+      if (abs(e0vec(ivec)-e0)<REL_TOL*abs(e0)) exit
+      if (abs(e0vec(ivec)-e0)<ABS_TOL) exit
       e0vec(ivec) = e0
     enddo ! norder
     if (norder>MAX_NORDER) call quit('Failed to converge energy to target &
        &accuracy.')
 
-    ! Report ground-state energy.
+    ! Solve again with final expansion order, make plot and report.
+    norder = norder-NITER_CONVERGE
+    call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, nplot=10)
     write(6,*) 'Ground state energy converges at expansion order '//&
-       &trim(i2s(norder))//':'
-    write(6,*) '  E0 (a.u.) = ', e0
+       &trim(i2s(norder))//'.'
+    write(6,*) 'E0 (non-dim) = ', e0
+    write(6,*) 'E0 (a.u.)    = ', e0*omega
 
-    ! Call again to make plot.
-    call get_ground_state (norder, norder_v, vcoeff, omega, e0, orbcoeff, &
-       &nplot=10)
+    ! Evaluate expectation values of <x^i>.
+    allocate(xpower_expval(0:20))
+    do iexp = 0, 20
+      xpower_expval(iexp) = eval_xpower_expval (norder, orbcoeff, iexp)
+      write(6,*) '<x^'//trim(i2s(iexp))//'> = ', xpower_expval(iexp)
+    enddo ! iexp
 
     ! Solve for the quadrature grid.
     ! FIXME - write
@@ -110,24 +128,21 @@ CONTAINS
   END SUBROUTINE main
 
 
-  SUBROUTINE get_ground_state (norder, norder_v, vcoeff, omega, e0, orbcoeff, &
-     &nplot)
+  SUBROUTINE get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, nplot)
     !---------------------------------------------------------!
     ! Given a one-dimensional (anharmonic) potential,         !
     !                                                         !
-    !   V(x) = Sum_i VCOEFF(i)*H_i(sqrt(OMEGA)*x) ,           !
+    !   v(x) = Sum_i VCOEFF(i)*N_i(x) ,                       !
     !                                                         !
     ! where H_i is the i-th Hermite polynomial, construct the !
     ! matrix elements of the Hamiltonian                      !
     !                                                         !
-    !   H(x) = -1/2 d/dx^2 + V(x) ,                           !
+    !   H(x) = -1/2 d/dx^2 + v(x) ,                           !
     !                                                         !
     ! in the basis of the eigenfunctions of the harmonic      !
-    ! oscillator,                                             !
+    ! oscillator of unit frequency,                           !
     !                                                         !
-    !   phi_i(x) = (2^i i!)^-1/2 (OMEGA/pi)^1/4 *             !
-    !              exp( -OMEGA * x^2 / 2) *                   !
-    !              H_i( sqrt(OMEGA)*x ) ,                     !
+    !   phi_i(x) = exp(-x^2/2) * N_i(x) ,                     !
     !                                                         !
     ! and solve for the coefficients of the normalized trial  !
     ! wave function,                                          !
@@ -138,11 +153,12 @@ CONTAINS
     !---------------------------------------------------------!
     IMPLICIT NONE
     INTEGER, INTENT(in) :: norder, norder_v
-    DOUBLE PRECISION, INTENT(in) :: vcoeff(0:norder_v), omega
+    DOUBLE PRECISION, INTENT(in) :: vcoeff(0:norder_v)
     DOUBLE PRECISION, INTENT(inout) :: e0, orbcoeff(0:norder)
     INTEGER, INTENT(in), OPTIONAL :: nplot
     ! Eigenproblem arrays.
-    DOUBLE PRECISION alpha(0:norder), hmatrix(0:norder,0:norder)
+    DOUBLE PRECISION alpha(0:norder), hmatrix(0:norder,0:norder), &
+       &cmatrix(0:norder,0:norder)
     ! Buffer for logarithms of factorials.
     DOUBLE PRECISION log_fact(0:norder)
     ! LAPACK work arrays.
@@ -150,25 +166,20 @@ CONTAINS
     INTEGER, ALLOCATABLE :: lapack_iwork(:)
     INTEGER lapack_lwork, lapack_liwork
     ! Variables for plotting.
-    DOUBLE PRECISION orbnorm, inv_sqrt_omega
-    DOUBLE PRECISION, ALLOCATABLE :: vcoeff_unnorm(:), hbasis(:)
-    DOUBLE PRECISION u, x, vu, psiu
+    DOUBLE PRECISION, ALLOCATABLE :: hbasis(:)
+    DOUBLE PRECISION x, vx, psix
     ! Parameters.
     DOUBLE PRECISION, PARAMETER :: PLOT_ORB_SCALE_FACTOR = 1.d0
     DOUBLE PRECISION, PARAMETER :: PLOT_MAX_X = 3.d0 ! on either side of zero
     INTEGER, PARAMETER :: PLOT_NPOINT = 100 ! on either side of zero
+    DOUBLE PRECISION, PARAMETER :: TOL_ZERO = 1.d3*epsilon(1.d0)
     ! Numerical constants.
-    DOUBLE PRECISION, PARAMETER :: log2 = log(2.d0)
     DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
+    DOUBLE PRECISION, PARAMETER :: fourth_root_pi_over_sqrt8 = &
+       &                           pi**0.25d0*sqrt(0.125d0)
     ! Misc local variables.
-    INTEGER i, j, iplot, ierr
+    INTEGER i, j, k, iplot, ierr
     DOUBLE PRECISION t1
-
-    ! Subtract harmonic potential from vcoeff and store coeffs in alpha.
-    alpha = 0.d0
-    alpha(0:norder_v) = vcoeff(0:norder_v)
-    alpha(0) = alpha(0) - 0.25d0*omega
-    alpha(2) = alpha(2) - 0.125d0*omega
 
     ! Get numerical constants to speed up operations.
     log_fact(0:norder) = eval_log_fact( (/ (i, i=0,norder) /) )
@@ -176,143 +187,204 @@ CONTAINS
     ! Populate Hamiltonian matrix in the basis of harmonic-oscillator
     ! eigenfunctions.
     do i = 0, norder
-      do j = i, norder
-        hmatrix(i,j) = eval_hmatrix (norder, i, j, omega, alpha, log_fact)
-        if (j>i) hmatrix(j,i) = hmatrix(i,j)
+      hmatrix(i,i) = eval_comb_Gamma (norder_v, i, i, vcoeff, log_fact) + &
+         &dble(i)+0.25d0 - fourth_root_pi_over_sqrt8*eval_Gamma(i,i,2,log_fact)
+      do j = i+1, norder
+        hmatrix(i,j) = eval_comb_Gamma (norder_v, i, j, vcoeff, log_fact) - &
+           &fourth_root_pi_over_sqrt8*eval_Gamma(i,j,2,log_fact)
+        hmatrix(j,i) = hmatrix(i,j)
       enddo ! j
     enddo ! i
+    cmatrix = hmatrix
 
-    ! Version with DSYEVD
-    ! Diagonalize Hamiltonian.  NB, alpha now used for eigenvalues.
+    ! Diagonalize Hamiltonian.
     lapack_lwork = 1
     lapack_liwork = 1
     allocate(lapack_work(lapack_lwork), lapack_iwork(lapack_liwork))
     lapack_lwork = -1
     lapack_liwork = -1
-    call dsyevd ('V', 'U', norder+1, hmatrix, norder+1, alpha, &
+    call dsyevd ('V', 'U', norder+1, cmatrix, norder+1, alpha, &
        &lapack_work, lapack_lwork, lapack_iwork, lapack_liwork, ierr)
     if (ierr/=0) call quit ('DSYEVD error '//trim(i2s(ierr))//'.')
     lapack_lwork = nint(lapack_work(1))
     lapack_liwork = lapack_iwork(1)
     deallocate(lapack_work, lapack_iwork)
     allocate(lapack_work(lapack_lwork), lapack_iwork(lapack_liwork))
-    call dsyevd ('V', 'U', norder+1, hmatrix, norder+1, alpha, &
+    call dsyevd ('V', 'U', norder+1, cmatrix, norder+1, alpha, &
        &lapack_work, lapack_lwork, lapack_iwork, lapack_liwork, ierr)
     if (ierr/=0) call quit ('DSYEVD error '//trim(i2s(ierr))//'.')
     deallocate(lapack_work, lapack_iwork)
+
+    ! Normalize the wave function, flush small coefficients to zero, normalize
+    ! the wave function again, and recalculate the variational energy.
+    do i = 0, norder
+      t1 = 1.d0/sqrt(sum(cmatrix(0:norder,i)**2))
+      cmatrix(0:norder,i) = t1*cmatrix(0:norder,i)
+      where (abs(cmatrix(0:norder,i)) < TOL_ZERO) cmatrix(0:norder,i) = 0.d0
+      t1 = 1.d0/sqrt(sum(cmatrix(0:norder,i)**2))
+      cmatrix(0:norder,i) = t1*cmatrix(0:norder,i)
+      alpha(i) = 0.d0
+      do j = 0, norder
+        t1 = 0.d0
+        do k = j+1, norder
+          t1 = t1 + cmatrix(k,i)*hmatrix(k,j)
+        enddo ! k
+        t1 = cmatrix(j,i)*(cmatrix(j,i)*hmatrix(j,j) + 2.d0*t1)
+        alpha(i) = alpha(i)+t1
+      enddo ! j
+    enddo ! i
 
     ! Return ground-state components.
     ! FIXME - if ground state is degenerate, how do we choose which
     ! eigenstate to return?
     e0 = alpha(0)
-    orbcoeff(0:norder) = hmatrix(0:norder,0)
-
-    ! Normalize coefficients so L2 norm is 1.
-    t1 = 1.d0/sqrt(sum(orbcoeff(0:norder)**2))
-    orbcoeff(0:norder) = t1*orbcoeff(0:norder)
+    orbcoeff(0:norder) = cmatrix(0:norder,0)
 
     ! Optionally, plot potential and first NPLOT eigenstates in xmgrace format
     ! to Fortran unit 11.
     if (present(nplot)) then
-      inv_sqrt_omega = 1.d0/omega
-      allocate (hbasis(0:norder), vcoeff_unnorm(0:norder_v))
+      allocate (hbasis(0:norder))
       ! Plot V(x).
-      vcoeff_unnorm(0:norder_v) = &
-         &(/ ( vcoeff(i) * exp( 0.5d0 * (eval_log_fact(i)+dble(i)*log2) ), &
-         &     i=0,norder_v ) /)
       do i = -PLOT_NPOINT, PLOT_NPOINT
         x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
-        u = x*inv_sqrt_omega
         call eval_hermite_poly_norm (norder, x, hbasis)
-        vu = sum(vcoeff_unnorm(0:norder_v)*hbasis(0:norder_v))
-        write(11,*) u, vu
+        vx = sum(vcoeff(0:norder_v)*hbasis(0:norder_v))
+        write(11,*) x, vx
       enddo ! i
       ! Plot Psi_n(x).
       do iplot = 0, min(norder,nplot)
-        orbnorm = (omega/pi)**0.25d0 / sqrt(sum(hmatrix(0:norder,iplot)**2))
         write(11,'(a)') '&'
         write(11,*) -PLOT_MAX_X, alpha(iplot)
         write(11,*) PLOT_MAX_X, alpha(iplot)
         write(11,'(a)') '&'
         do i = -PLOT_NPOINT, PLOT_NPOINT
           x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
-          u = x*inv_sqrt_omega
           call eval_hermite_poly_norm (norder, x, hbasis)
-          t1 = orbnorm*exp(-0.5d0*x*x)
-          psiu = t1*sum(hmatrix(0:norder,iplot)*hbasis(0:norder))
-          write(11,*) u, alpha(iplot)+PLOT_ORB_SCALE_FACTOR*psiu
+          t1 = exp(-0.5d0*x*x)
+          psix = t1*sum(cmatrix(0:norder,iplot)*hbasis(0:norder))
+          write(11,*) x, alpha(iplot)+PLOT_ORB_SCALE_FACTOR*psix
         enddo ! i
       enddo ! iplot
-      deallocate (hbasis, vcoeff_unnorm)
+      deallocate (hbasis)
     endif
 
   END SUBROUTINE get_ground_state
 
 
-  DOUBLE PRECISION FUNCTION eval_hmatrix (norder, i, j, omega, alpha, &
-     &log_fact)
-    !------------------------------------------------------------!
-    ! Evaluate the matrix element of the Hamiltonian between the !
-    ! i-th and j-th eigenfunctions of the harmonic oscillator.   !
-    !------------------------------------------------------------!
+  DOUBLE PRECISION FUNCTION eval_xpower_expval (norder, orbcoeff, iexp)
+    !---------------------------------------------------------------------!
+    ! Given the coefficients ORBCOEFF(0:NORDER) of a trial wave function, !
+    ! evaluate the expectation value of the natural power <x^IEXP> .      !
+    !---------------------------------------------------------------------!
     IMPLICIT NONE
-    INTEGER, INTENT(in) :: norder, i, j
-    DOUBLE PRECISION, INTENT(in) :: omega, alpha(0:norder), &
-       &log_fact(0:norder)
-    ! Numerical constants.
-    DOUBLE PRECISION, PARAMETER :: log2 = log(2.d0)
-    ! Local variables.
-    DOUBLE PRECISION t1, t2, log_sqrt_fact_i_fact_j
-    INTEGER k
-    eval_hmatrix = 0.d0
-    log_sqrt_fact_i_fact_j = 0.5d0*(log_fact(i)+log_fact(j))
-    do k = i+j, abs(i-j), -2
-      if (k>norder) cycle
-      t1 = alpha(k)
-      if (k==0) t1 = t1 + omega*(dble(i)+0.5d0)
-      t2 = log_sqrt_fact_i_fact_j + log_fact(k) + 0.5d0*dble(k)*log2 -&
-        &log_fact((j+k-i)/2) - log_fact((k+i-j)/2) - log_fact((i+j-k)/2)
-      eval_hmatrix = eval_hmatrix + t1*exp(t2)
-    enddo ! k
-  END FUNCTION eval_hmatrix
+    INTEGER, INTENT(in) :: norder, iexp
+    DOUBLE PRECISION, INTENT(in) :: orbcoeff(0:norder)
+    ! Misc local variables.
+    INTEGER i, j, piv_hmatrix(0:iexp)
+    DOUBLE PRECISION lu_hmatrix(0:iexp,0:iexp), xcoeff_nat(0:iexp), &
+       &xcoeff(0:iexp), log_fact(0:max(iexp,norder))
 
+    ! Re-represent x^iexp in the basis of Hermite polynomials.
+    xcoeff_nat(0:iexp) = 0.d0
+    xcoeff_nat(iexp) = 1.d0
+    call lu_decom_hermite_matrix (iexp, lu_hmatrix, piv_hmatrix)
+    call convert_natpoly_to_hermite (iexp, lu_hmatrix, piv_hmatrix, &
+       &xcoeff_nat, xcoeff)
 
-  ELEMENTAL DOUBLE PRECISION FUNCTION eval_log_fact(k)
-    !----------------------------------------------!
-    ! Returns the logarithm of the factorial of k. !
-    !----------------------------------------------!
-    IMPLICIT NONE
-    INTEGER, INTENT(in) :: k
-    ! Local variables.
-    INTEGER i
-    eval_log_fact = 0.d0
-    do i = 2, k
-      eval_log_fact = eval_log_fact + log(dble(i))
+    ! Get numerical constants to speed up operations.
+    log_fact(0:max(iexp,norder)) = &
+       &eval_log_fact( (/ (i, i=0,max(iexp,norder)) /) )
+
+    ! Evaluate expectation value.
+    eval_xpower_expval = 0.d0
+    do i = 0, norder
+      eval_xpower_expval = eval_xpower_expval + orbcoeff(i) * orbcoeff(i) * &
+         &eval_comb_Gamma (iexp, i, i, xcoeff, log_fact)
+      do j = i+1, norder
+        eval_xpower_expval = eval_xpower_expval + &
+           &2.d0 * orbcoeff(j) * orbcoeff(i) * eval_comb_Gamma &
+           &(iexp, i, j, xcoeff, log_fact)
+      enddo ! j
     enddo ! i
-  END FUNCTION eval_log_fact
+    if (abs(eval_xpower_expval)<1.d3*epsilon(1.d0)) eval_xpower_expval = 0.d0
+
+  END FUNCTION eval_xpower_expval
+
+
+  ! Hermite polynomial tools.  NB, we use "normalized" Hermite polynomials,
+  ! N_n(x) = pi^-1/4 2^-n/2 (n!)^-1/2 H_n(x).
+
+  DOUBLE PRECISION FUNCTION eval_Gamma (i, j, k, log_fact)
+    !--------------------------------------------------------------!
+    ! Evaluate the Gamma_i,j,k symbol,                             !
+    !                                                              !
+    !   Gamma_i,j,k = integral exp(-x^2) N_i(x) N_j(x) N_k(x) dx . !
+    !--------------------------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: i, j, k
+    DOUBLE PRECISION, INTENT(in) :: log_fact(0:)
+    ! Numerical constants.
+    DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
+    DOUBLE PRECISION, PARAMETER :: fourth_log_pi = 0.25d0*log(pi)
+    ! Local variables.
+    DOUBLE PRECISION t1
+    eval_Gamma = 0.d0
+    if (k<abs(i-j) .or. k>i+j .or. mod(i+j+k,2)/=0) return
+    t1 = -fourth_log_pi + 0.5d0*(log_fact(i) + log_fact(j) + log_fact(k)) -&
+      &log_fact((j+k-i)/2) - log_fact((k+i-j)/2) - log_fact((i+j-k)/2)
+    eval_Gamma = exp(t1)
+  END FUNCTION eval_Gamma
+
+
+  DOUBLE PRECISION FUNCTION eval_comb_Gamma (n, i, j, coeff, log_fact)
+    !--------------------------------------------------!
+    ! Evaluate the linear combination of Gamma symbols !
+    !                                                  !
+    !   Sum_k=0^n coeff_k * Gamma_i,j,k .              !
+    !                                                  !
+    ! NB, Gamma evaluator inlined to skip the logic.   !
+    !--------------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: n, i, j
+    DOUBLE PRECISION, INTENT(in) :: coeff(0:n), log_fact(0:)
+    ! Numerical constants.
+    DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
+    DOUBLE PRECISION, PARAMETER :: fourth_log_pi = 0.25d0*log(pi)
+    ! Local variables.
+    DOUBLE PRECISION t1
+    INTEGER k
+    eval_comb_Gamma = 0.d0
+    do k = i+j, abs(i-j), -2
+      if (k>n) cycle
+      t1 = -fourth_log_pi + 0.5d0*(log_fact(i) + log_fact(j) + log_fact(k)) -&
+        &log_fact((j+k-i)/2) - log_fact((k+i-j)/2) - log_fact((i+j-k)/2)
+      eval_comb_Gamma = eval_comb_Gamma + coeff(k)*exp(t1)
+    enddo ! k
+  END FUNCTION eval_comb_Gamma
 
 
   SUBROUTINE eval_hermite_poly_norm (n, x, h)
     !---------------------------------------------------!
-    ! Evaluate "normalized" Hermite polyonials,         !
-    !   h_n(x) = H_n(x) / sqrt(2^n n!) ,                !
-    ! for n=0:N at x=X, returning the values in h(0:N). !
+    ! Evaluate N_n(x) for n = 0:N at x=X, returning the !
+    ! values in H(0:N).                                 !
     !---------------------------------------------------!
     IMPLICIT NONE
     INTEGER, INTENT(in) :: n
     DOUBLE PRECISION, INTENT(in) :: x
     DOUBLE PRECISION, INTENT(inout) :: h(0:n)
     ! Numerical constants.
+    DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
+    DOUBLE PRECISION, PARAMETER :: inv_pi_one_fourth = pi**(-0.25d0)
     DOUBLE PRECISION, PARAMETER :: sqrt2 = sqrt(2.d0)
     ! Local variables.
     DOUBLE PRECISION t0, t1, t2, sqrti, sqrti_1, sqrt2_x
     INTEGER i
     if (n<0) return
-    t1 = 1.d0
+    t1 = inv_pi_one_fourth
     h(0) = t1
     if (n<1) return
     sqrt2_x = sqrt2*x
-    t0 = sqrt2_x
+    t0 = inv_pi_one_fourth*sqrt2_x
     sqrti = 1.d0
     h(1) = t0
     do i = 2, n
@@ -326,7 +398,7 @@ CONTAINS
   END SUBROUTINE eval_hermite_poly_norm
 
 
-  SUBROUTINE LU_decom_hermite_matrix (norder, lu_hmatrix, piv_hmatrix)
+  SUBROUTINE lu_decom_hermite_matrix (norder, lu_hmatrix, piv_hmatrix)
     !-----------------------------------------------------------------!
     ! Returns the LU decomposition of the matrix of coefficients of   !
     ! natural powers in Hermite polynomials up to order NORDER, which !
@@ -338,27 +410,31 @@ CONTAINS
     DOUBLE PRECISION, INTENT(inout) :: lu_hmatrix(0:norder,0:norder)
     INTEGER, INTENT(inout) :: piv_hmatrix(0:norder)
     ! Numerical constants.
+    DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
+    DOUBLE PRECISION, PARAMETER :: fourth_log_pi = 0.25d0*log(pi)
     DOUBLE PRECISION, PARAMETER :: log2 = log(2.d0)
     ! Misc local variables.
     DOUBLE PRECISION t1
-    INTEGER i, j, isgn, ierr
+    INTEGER n, i, isgn, ierr
 
-    ! Build matrix of coefficients of H_i as a linear combination of natural
+    ! Build matrix of coefficients of N_n as a linear combination of natural
     ! powers.
-    do i = 0, norder
+    lu_hmatrix = 0.d0
+    do n = 0, norder
       isgn = 1
-      do j = i, 0, -2
-        t1 = eval_log_fact(i) - eval_log_fact(j) - eval_log_fact(i/2-j/2)
-        lu_hmatrix(j,i) = dble(isgn) * exp(t1+dble(j)*log2)
+      do i = n, 0, -2
+        t1 = 0.5d0*(eval_log_fact(n) + dble(2*i-n)*log2) - &
+           &eval_log_fact(i) - eval_log_fact(n/2-i/2) - fourth_log_pi
+        lu_hmatrix(i,n) = dble(isgn) * exp(t1)
         isgn = -isgn
-      enddo ! j
-    enddo ! i
+      enddo ! i
+    enddo ! n
 
     ! LU-decompose the matrix.
     call dgetrf (norder+1, norder+1, lu_hmatrix, norder+1, piv_hmatrix, ierr)
     if (ierr/=0) call quit ('DGETRF error '//trim(i2s(ierr))//'.')
 
-  END SUBROUTINE LU_decom_hermite_matrix
+  END SUBROUTINE lu_decom_hermite_matrix
 
 
   SUBROUTINE convert_natpoly_to_hermite (norder, lu_hmatrix, piv_hmatrix, &
@@ -378,6 +454,24 @@ CONTAINS
        &norder+1, ierr)
     if (ierr/=0) call quit ('DGETRS error '//trim(i2s(ierr))//'.')
   END SUBROUTINE convert_natpoly_to_hermite
+
+
+  ! Numerical tools.
+
+
+  ELEMENTAL DOUBLE PRECISION FUNCTION eval_log_fact(k)
+    !----------------------------------------------!
+    ! Returns the logarithm of the factorial of k. !
+    !----------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: k
+    ! Local variables.
+    INTEGER i
+    eval_log_fact = 0.d0
+    do i = 2, k
+      eval_log_fact = eval_log_fact + log(dble(i))
+    enddo ! i
+  END FUNCTION eval_log_fact
 
 
   ! String utilities.
