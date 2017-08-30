@@ -42,9 +42,11 @@ CONTAINS
     DOUBLE PRECISION, ALLOCATABLE :: xpower_expval(:)
     DOUBLE PRECISION, ALLOCATABLE :: grid_x(:), grid_p(:)
     ! Evaluation of expectation value of v(x).
-    DOUBLE PRECISION v_expval, x, vx
-    DOUBLE PRECISION, ALLOCATABLE :: log_fact(:), hbasis(:)
-    INTEGER j
+    DOUBLE PRECISION x, fx, fexpval, dx, xl, xr, psix2
+    DOUBLE PRECISION, ALLOCATABLE :: hbasis(:)
+    INTEGER, PARAMETER :: NPOINT_BRUTE_FORCE = 10000
+    INTEGER, PARAMETER :: MAX_NGRID = 20
+    DOUBLE PRECISION, PARAMETER :: PSI2_TOL = 1.d-12
     ! Mist local variables.
     CHARACTER(2048) line
     INTEGER i, iexp, igrid, ierr
@@ -108,25 +110,46 @@ CONTAINS
     write(6,*) 'E0 (a.u.)       = ', e0*omega
     write(6,*) 'Virial ratio    = ', vratio
 
-    ! Evaluate expectaion value of potential and report.
-    allocate(log_fact(0:norder))
-    log_fact(0:norder) = eval_log_fact( (/ (i, i=0,norder) /) )
-    v_expval = 0.d0
-    do i = 0, norder
-      t1 = eval_comb_Gamma (norder_v, i, i, vcoeff, log_fact)
-      v_expval = v_expval + t1*orbcoeff(i)**2
-      do j = i+1, norder
-        t1 = eval_comb_Gamma (norder_v, i, j, vcoeff, log_fact)
-        v_expval = v_expval + 2.d0*t1*orbcoeff(i)*orbcoeff(j)
-      enddo ! j
+    ! Brute-force integration of target function.
+    ! Locate integration range.
+    allocate(hbasis(0:norder))
+    x = -0.5d0
+    do
+      call eval_hermite_poly_norm (norder, x, hbasis)
+      t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
+      if (exp(-x*x)<PSI2_TOL*t1*t1) exit
+      x = 1.5d0*x
+    enddo
+    xl = x
+    x = 0.5d0
+    do
+      call eval_hermite_poly_norm (norder, x, hbasis)
+      t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
+      if (exp(-x*x)<PSI2_TOL*t1*t1) exit
+      x = 1.5d0*x
+    enddo
+    xr = x
+    dx = (xr-xl)/dble(NPOINT_BRUTE_FORCE)
+    fexpval = 0.d0
+    do i = 0, NPOINT_BRUTE_FORCE
+      x = xl + (dble(i)/dble(NPOINT_BRUTE_FORCE))*(xr-xl)
+      call eval_hermite_poly_norm (norder, x, hbasis)
+      t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
+      psix2 = exp(-x*x)*t1*t1
+      !fx = cos(x)
+      !fx = 1.d0 / (1.d0 + x**2)
+      fx = exp(-(x-0.5d0)**2)
+      fexpval = fexpval + fx*psix2*dx
     enddo ! i
-    write(6,*) '<V>             = ',v_expval
-    write(6,*)
-    deallocate(log_fact)
+    write(6,*) '[x] = ', xl, xr
+    write(6,*) '<f> = ', fexpval
+    write(13,*) 0, fexpval
+    write(13,*) MAX_NGRID, fexpval
+    write(13,'(a)') '&'
+    deallocate(hbasis)
 
     ! Loop over quadrature grid sizes.
-    allocate(hbasis(0:norder_v))
-    do ngrid = 2, 10
+    do ngrid = 2, MAX_NGRID
       allocate(xpower_expval(0:2*ngrid-1), grid_x(ngrid), grid_P(ngrid))
       ! Evaluate expectation values of <x^i>.
       do iexp = 0, 2*ngrid-1
@@ -155,21 +178,21 @@ CONTAINS
         write(12,*)grid_x(ngrid)+1.d0, dble(ngrid-2)
         write(12,'(a)')'&'
         ! Evaluate expectation value of potential energy using this grid.
-        v_expval = 0.d0
+        fexpval = 0.d0
         do igrid = 1, ngrid
           x = grid_x(igrid)
-          call eval_hermite_poly_norm (norder_v, x, hbasis)
-          vx = sum(vcoeff(0:norder_v)*hbasis(0:norder_v))
-          !vx = cos(2.d0*x)
-          v_expval = v_expval + grid_P(igrid)*vx
+          !fx = cos(x)
+          !fx = 1.d0 / (1.d0 + x**2)
+          fx = exp(-(x-0.5d0)**2)
+          fexpval = fexpval + grid_P(igrid)*fx
         enddo ! igrid
-        write(6,*)'  <V> =~ ', v_expval
+        write(6,*)'  <f> = ', fexpval
+        write(13,*) ngrid, fexpval
       endif
       write(6,*)
       ! Clean up.
       deallocate(xpower_expval, grid_x, grid_P)
     enddo ! ngrid
-    deallocate(hbasis)
 
   END SUBROUTINE main
 
@@ -205,38 +228,38 @@ CONTAINS
        &vcoeff)
     call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
     fv = abs(vratio-1.d0)
-    xu = 0.d0
-    fu = -1.d0
-
-    ! Bracket to the right.
-    do
-      xw = 1.2d0*xv
-      call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
-         &(/ ( vcoeff_nat(i)*xw**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
-         &vcoeff)
-      call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
-      fw = abs(vratio-1.d0)
-      if (fw>fv) exit
-      xu = xv
-      fu = fv
-      xv = xw
-      fv = fw
-    enddo
 
     ! Bracket to the left.
-    if (fu<fv) then
+    xw = 0.d0
+    fw = -1.d0
+    do
+      xu = 0.9d0*xv
+      call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
+         &(/ ( vcoeff_nat(i)*xu**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
+         &vcoeff)
+      call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
+      fu = abs(vratio-1.d0)
+      if (fu>fv) exit
+      xw = xv
+      fw = fv
+      xv = xu
+      fv = fu
+    enddo
+
+    ! Bracket to the right.
+    if (fw<fu) then
       do
-        xu = 0.8d0*xv
+        xw = 1.1d0*xv
         call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
-           &(/ ( vcoeff_nat(i)*xu**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
+           &(/ ( vcoeff_nat(i)*xw**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
            &vcoeff)
         call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
-        fu = abs(vratio-1.d0)
-        if (fu>fv) exit
-        xw = xv
-        fw = fv
-        xv = xu
-        fv = fu
+        fw = abs(vratio-1.d0)
+        if (fw>fv) exit
+        xu = xv
+        fu = fv
+        xv = xw
+        fv = fw
       enddo
     endif
 
