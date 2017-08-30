@@ -73,8 +73,8 @@ CONTAINS
        &call quit ('Leading term of V(u) must have a positive coefficient.')
 
     ! Work out optimal omega by minimizing virial ratio error for a wave
-    ! function of twice the order of the potential.
-    call obtain_omega(norder_v, vcoeff_nat, 2*norder_v, omega)
+    ! function of fixed expansion order.
+    call obtain_omega (norder_v, vcoeff_nat, 2*norder_v, omega)
     inv_sqrt_omega = 1.d0/sqrt(omega)
     write(6,*) 'Omega (a.u.)    = ', omega
 
@@ -137,29 +137,34 @@ CONTAINS
       !call solve_grid_nl2sol (ngrid, xpower_expval, norder, orbcoeff, grid_x, &
       !   &grid_P)
       call solve_grid_newton (ngrid, xpower_expval, norder, orbcoeff, grid_x, &
-         &grid_P)
-      ! Report.
-      write(12,*)grid_x(1)-1.d0, dble(ngrid-2)
-      do igrid = 1, ngrid
-        write(6,*)'  Grid point #'//trim(i2s(igrid))//': x, P = ', &
-           &grid_x(igrid), grid_P(igrid)
-        write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2)
-        write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2) + grid_P(igrid)
-        write(12,*) grid_x(igrid)+0.1d0, dble(ngrid-2) + grid_P(igrid)
-        write(12,*) grid_x(igrid)+0.1d0, dble(ngrid-2)
-      enddo ! igrid
-      write(12,*)grid_x(ngrid)+1.d0, dble(ngrid-2)
-      write(12,'(a)')'&'
-      ! Evaluate expectation value of potential energy using this grid.
-      v_expval = 0.d0
-      do igrid = 1, ngrid
-        x = grid_x(igrid)
-        call eval_hermite_poly_norm (norder_v, x, hbasis)
-        vx = sum(vcoeff(0:norder_v)*hbasis(0:norder_v))
-        !vx = cos(2.d0*x)
-        v_expval = v_expval + grid_P(igrid)*vx
-      enddo ! igrid
-      write(6,*)'  <V> =~ ', v_expval
+         &grid_P, ierr)
+      if (ierr/=0) then
+        ! Report failure.
+        write(6,*) '  Grid did not converge.'
+      else
+        ! Report success.
+        write(12,*)grid_x(1)-1.d0, dble(ngrid-2)
+        do igrid = 1, ngrid
+          write(6,*)'  Grid point #'//trim(i2s(igrid))//': x, P = ', &
+             &grid_x(igrid), grid_P(igrid)
+          write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2)
+          write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2) + grid_P(igrid)
+          write(12,*) grid_x(igrid)+0.1d0, dble(ngrid-2) + grid_P(igrid)
+          write(12,*) grid_x(igrid)+0.1d0, dble(ngrid-2)
+        enddo ! igrid
+        write(12,*)grid_x(ngrid)+1.d0, dble(ngrid-2)
+        write(12,'(a)')'&'
+        ! Evaluate expectation value of potential energy using this grid.
+        v_expval = 0.d0
+        do igrid = 1, ngrid
+          x = grid_x(igrid)
+          call eval_hermite_poly_norm (norder_v, x, hbasis)
+          vx = sum(vcoeff(0:norder_v)*hbasis(0:norder_v))
+          !vx = cos(2.d0*x)
+          v_expval = v_expval + grid_P(igrid)*vx
+        enddo ! igrid
+        write(6,*)'  <V> =~ ', v_expval
+      endif
       write(6,*)
       ! Clean up.
       deallocate(xpower_expval, grid_x, grid_P)
@@ -205,7 +210,7 @@ CONTAINS
 
     ! Bracket to the right.
     do
-      xw = 2.d0*xv
+      xw = 1.2d0*xv
       call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
          &(/ ( vcoeff_nat(i)*xw**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
          &vcoeff)
@@ -221,7 +226,7 @@ CONTAINS
     ! Bracket to the left.
     if (fu<fv) then
       do
-        xu = 0.5d0*xv
+        xu = 0.8d0*xv
         call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
            &(/ ( vcoeff_nat(i)*xu**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
            &vcoeff)
@@ -239,6 +244,7 @@ CONTAINS
     do
       call parabolic_min (xu, xv, xw, fu, fv, fw, x, f, rejected)
       if (rejected) exit
+      if (x<=xu.or.x>=xw) exit
       call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
          &(/ ( vcoeff_nat(i)*x**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
          &vcoeff)
@@ -248,20 +254,26 @@ CONTAINS
         if (x<xv) then
           xw = xv
           fw = fv
-        else
+        elseif (x>xv) then
           xu = xv
           fu = fv
+        else
+          exit
         endif
         xv = x
         fv = f
-      else
+      elseif (f>fv) then
         if (x<xv) then
           xu = x
           fu = f
-        else
+        elseif (x>xv) then
           xw = x
           fw = f
+        else
+          exit
         endif
+      else
+        exit
       endif
       if (xw-xu<OMEGA_TOL) exit
     enddo
@@ -315,8 +327,8 @@ CONTAINS
     DOUBLE PRECISION x, vx, psix
     ! Parameters.
     DOUBLE PRECISION, PARAMETER :: PLOT_ORB_SCALE_FACTOR = 1.d0
-    DOUBLE PRECISION, PARAMETER :: PLOT_MAX_X = 3.d0 ! on either side of zero
-    INTEGER, PARAMETER :: PLOT_NPOINT = 100 ! on either side of zero
+    DOUBLE PRECISION, PARAMETER :: PLOT_MAX_X = 5.d0 ! on either side of zero
+    INTEGER, PARAMETER :: PLOT_NPOINT = 200 ! on either side of zero
     DOUBLE PRECISION, PARAMETER :: TOL_ZERO = 1.d3*epsilon(1.d0)
     ! Numerical constants.
     DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
@@ -483,7 +495,7 @@ CONTAINS
 
 
   SUBROUTINE solve_grid_newton (ngrid, xpower_expval, norder, orbcoeff, &
-     &grid_x, grid_P)
+     &grid_x, grid_P, ierr)
     !------------------------------------------------------------!
     ! Given <x^n> for n=0:2*NGRID-1, solve for the parameters of !
     ! the NGRID-point quadrature grid using Newton's method.     !
@@ -493,6 +505,7 @@ CONTAINS
     DOUBLE PRECISION, INTENT(in) :: xpower_expval(0:2*ngrid-1), &
        &orbcoeff(0:norder)
     DOUBLE PRECISION, INTENT(inout) :: grid_x(ngrid), grid_P(ngrid)
+    INTEGER, INTENT(inout) :: ierr
     ! Maximum number of Nweton's method iterations to attempt.
     INTEGER, PARAMETER :: MAX_ITER = 50
     LOGICAL, PARAMETER :: VERBOSE = .false.
@@ -500,10 +513,12 @@ CONTAINS
     DOUBLE PRECISION fvec(2*ngrid), Jmat(2*ngrid,2*ngrid), t1, &
        &grid_P_test(ngrid), grid_x_test(ngrid), xscale, x0max, x, &
        &hbasis(0:norder), dorbcoeff(0:norder-1), grid_orb(ngrid), &
-       &xpower_renorm(0:2*ngrid-1), xu, xv, xw, fu, fv, fw, f, &
+       &xpower_renorm(0:2*ngrid-1), xu, xv, xw, fu, fv, fw, f, f0, &
        &fvec_test(2*ngrid)
-    INTEGER i, iter, piv(2*ngrid), ierr
+    INTEGER i, iter, piv(2*ngrid)
     LOGICAL rejected
+
+    ierr = 0
 
     ! Define x rescaling factor.
     xscale = xpower_expval(2*ngrid-2)**(1.d0/dble(2*ngrid-2))
@@ -530,20 +545,15 @@ CONTAINS
       ! Obtain Newton's method step.
       call eval_fvec_Jmat (ngrid, grid_x, grid_P, xscale, xpower_renorm, &
          &norder, orbcoeff, dorbcoeff, fvec, Jmat)
-      xu = 0.d0
-      fu = sum(fvec*fvec)
+      f0 = sum(fvec*fvec)
       call dgetrf (2*ngrid, 2*ngrid, Jmat, 2*ngrid, piv, ierr)
-      if (ierr/=0) then
-        write(6,*) 'DGETRF error '//trim(i2s(ierr))//'.'
-        return
-      endif
+      if (ierr/=0) return
       call dgetrs ('N', 2*ngrid, 1, Jmat, 2*ngrid, piv, fvec, 2*ngrid, ierr)
-      if (ierr/=0) then
-        write(6,*) 'DGETRS error '//trim(i2s(ierr))//'.'
-        return
-      endif
+      if (ierr/=0) return
 
       ! Test Newton's step.
+      xu = 0.d0
+      fu = f0
       xw = 1.d0
       do
         grid_P_test = grid_P - xw*fvec(ngrid+1:2*ngrid)
@@ -602,6 +612,7 @@ CONTAINS
       do
         call parabolic_min (xu, xv, xw, fu, fv, fw, x, f, rejected)
         if (rejected) exit
+        if (x<=xu.or.x>=xw) exit
         grid_P_test = grid_P - x*fvec(ngrid+1:2*ngrid)
         grid_x_test = grid_x - x*fvec(1:ngrid)
         call eval_fvec (ngrid, grid_x_test, grid_P_test, xscale, &
@@ -640,21 +651,30 @@ CONTAINS
       grid_x = grid_x - fvec(1:ngrid)
       grid_P = grid_P - fvec(ngrid+1:2*ngrid)
 
-      ! Check convergence.
+      ! Check function and parameter convergence.
       t1 = sqrt(sum(fvec**2)/dble(2*ngrid))
       if (VERBOSE) then
         write(6,*) '  Iteration '//trim(i2s(iter))//':'
-        write(6,*) '    Lambda    = ', xv
-        write(6,*) '    Disp norm = ', t1
+        write(6,*) '    delta f    = ', f0-fv
+        write(6,*) '    Step scale = ', xv
+        write(6,*) '    Disp norm  = ', t1
         write(6,*) '    Unscaled parameters:'
         do i = 1, ngrid
           write(6,*) '      x,P #'//trim(i2s(i))//': ', grid_x(i), grid_P(i)
         enddo ! i
       endif ! VERBOSE
-      if (t1<1.d-10) exit
+      if (abs(f0)<1.d-12) exit
+      if (abs(f0-fv)<1.d-8*abs(f0)) then
+        ierr = 1
+        exit
+      endif
+      if (t1<1.d-10) then
+        ierr = 2
+        exit
+      endif
 
     enddo
-    if (iter>MAX_ITER) write(6,*) '  Grid did not converge.'
+    if (iter>MAX_ITER) ierr = 3
 
     ! Rescale grid parameters.
     grid_x = grid_x*xscale
