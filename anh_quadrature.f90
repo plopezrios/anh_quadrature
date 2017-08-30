@@ -120,10 +120,10 @@ CONTAINS
       enddo ! iexp
       ! Solve for the quadrature grid.
       write(6,*)'Grid size '//trim(i2s(ngrid))//':'
-      call solve_grid_nl2sol (ngrid, xpower_expval, norder, orbcoeff, grid_x, &
-         &grid_P)
-      !call solve_grid_newton (ngrid, xpower_expval, norder, orbcoeff, grid_x, &
+      !call solve_grid_nl2sol (ngrid, xpower_expval, norder, orbcoeff, grid_x, &
       !   &grid_P)
+      call solve_grid_newton (ngrid, xpower_expval, norder, orbcoeff, grid_x, &
+         &grid_P)
       ! Report.
       write(12,*)grid_x(1)-1.d0, dble(ngrid-2)
       do igrid = 1, ngrid
@@ -360,7 +360,8 @@ CONTAINS
     ! Given <x^n> for n=0:2*NGRID-1, solve for the parameters of !
     ! the NGRID-point quadrature grid using Newton's method.     !
     !------------------------------------------------------------!
-    USE lsf, ONLY : lsf_res, lsf_xpower_expval, lsf_xscale
+    USE lsf, ONLY : lsf_res, lsf_xpower_expval, lsf_xscale, lsf_orbcoeff, &
+       &            lsf_norder
     USE toms573, ONLY : nl2sno, dfault
     IMPLICIT NONE
     INTEGER, INTENT(in) :: ngrid, norder
@@ -376,8 +377,10 @@ CONTAINS
 
     ! Param vector size.
     n = 2*ngrid
-    allocate(lsf_xpower_expval(0:n-1))
+    allocate(lsf_xpower_expval(0:n-1), lsf_orbcoeff(0:norder))
     lsf_xpower_expval = xpower_expval
+    lsf_norder = norder
+    lsf_orbcoeff = orbcoeff
 
     ! Define x rescaling factor.
     xscale = xpower_expval(2*ngrid-2)**(1.d0/dble(2*ngrid-2))
@@ -387,20 +390,18 @@ CONTAINS
     ! Initialize to something sensible.
     grid_x(1:ngrid) = (/ ( xpower_expval(1)/xscale - x0max + &
        &                   2*x0max*dble(i-1)/dble(ngrid-1), i=1,ngrid) /)
-    do i = 1, ngrid
-      x = grid_x(i)*xscale
-      call eval_hermite_poly_norm (norder, x, hbasis)
-      grid_P(i) = exp(-x*x) * sum(orbcoeff(0:norder)*hbasis(0:norder))**2
-    enddo ! i
-    !grid_P = exp(-(grid_x*xscale)**2)
-    grid_P = grid_P/sum(grid_P)
+    grid_P = 1.d0
 
     ! Allocate NL2SOL work arrays.
     allocate (iv_nl2sol(60+n), v_nl2sol(93+n*(n+3)+n*(3*n+33)/2))
+
+    ! Put parameters.
+    param(1:ngrid) = grid_x
+    param(ngrid+1:2*ngrid) = grid_P
+
+    ! Call nl2sol.
     iv_nl2sol=0
     v_nl2sol=0.d0
-
-    ! Initialize NL2SOL.
     call dfault(iv_nl2sol,v_nl2sol)
     iv_nl2sol(14:15)=0   ! suppress covariance matrix evaluation and ouput
     iv_nl2sol(17)=100000 ! maximum number of function evaluations
@@ -408,15 +409,35 @@ CONTAINS
     iv_nl2sol(19:20)=0   ! suppress per-iteration output
     iv_nl2sol(21)=-1     ! I/O unit (suppress all output)
     iv_nl2sol(22:24)=0   ! suppress initial and final output
-
-    ! Call nl2sol.
-    param(1:ngrid) = grid_x
-    param(ngrid+1:2*ngrid) = grid_P
     call nl2sno(n,n,param,lsf_res,iv_nl2sol,v_nl2sol)
+
+    ! Reset weights.
+    param(ngrid+1:2*ngrid) = 1.d0
+
+    ! Call nl2sol again.
+    iv_nl2sol=0
+    v_nl2sol=0.d0
+    call dfault(iv_nl2sol,v_nl2sol)
+    iv_nl2sol(14:15)=0   ! suppress covariance matrix evaluation and ouput
+    iv_nl2sol(17)=100000 ! maximum number of function evaluations
+    iv_nl2sol(18)=100000 ! maximum number of iterations
+    iv_nl2sol(19:20)=0   ! suppress per-iteration output
+    iv_nl2sol(21)=-1     ! I/O unit (suppress all output)
+    iv_nl2sol(22:24)=0   ! suppress initial and final output
+    call nl2sno(n,n,param,lsf_res,iv_nl2sol,v_nl2sol)
+
+    ! Get parameters.
     grid_x = param(1:ngrid)*xscale
     grid_P = param(ngrid+1:2*ngrid)
+    do i = 1, ngrid
+      x = grid_x(i)
+      call eval_hermite_poly_norm (norder, x, hbasis)
+      grid_P(i) = grid_P(i) * exp(-x*x) * &
+         &sum(orbcoeff(0:norder)*hbasis(0:norder))**2
+    enddo ! i
+    grid_P = grid_P/sum(grid_P)
 
-    deallocate(lsf_xpower_expval)
+    deallocate(lsf_xpower_expval, lsf_orbcoeff)
 
   END SUBROUTINE solve_grid_nl2sol
 
@@ -434,52 +455,65 @@ CONTAINS
     DOUBLE PRECISION, INTENT(inout) :: grid_x(ngrid), grid_P(ngrid)
     ! Maximum number of Nweton's method iterations to attempt.
     INTEGER, PARAMETER :: MAX_ITER = 50
-    LOGICAL, PARAMETER :: VERBOSE = .false.
+    LOGICAL, PARAMETER :: VERBOSE = .true.
     ! Misc local variables.
     DOUBLE PRECISION fvec(2*ngrid), Jmat(2*ngrid,2*ngrid), t1, lambda, &
        &grid_P_test(ngrid), grid_x_test(ngrid), xscale, x0max, x, &
-       &hbasis(0:norder)
+       &hbasis(0:norder), dorbcoeff(0:norder-1), grid_orb(ngrid), &
+       &grid_dorb(ngrid)
     INTEGER i, iter, piv(2*ngrid), ierr
 
     ! Define x rescaling factor.
     xscale = xpower_expval(2*ngrid-2)**(1.d0/dble(2*ngrid-2))
     x0max = 1.d0 + 0.423d0*log(dble(ngrid-1))
+    if (VERBOSE) then
+      write(6,*) '  Using xscale = ', xscale
+      write(6,*) '  Using x0max  = ', x0max
+    endif
+
+    ! Define wave function derivative.
+    do i = 0, norder-1
+      dorbcoeff(i) = orbcoeff(i+1) * sqrt(dble(2*i+2))
+    enddo ! i
 
     ! Initialize to something sensible.
     grid_x(1:ngrid) = (/ ( xpower_expval(1)/xscale - x0max + &
        &                   2*x0max*dble(i-1)/dble(ngrid-1), i=1,ngrid) /)
-    do i = 1, ngrid
-      x = grid_x(i)*xscale
-      call eval_hermite_poly_norm (norder, x, hbasis)
-      grid_P(i) = exp(-x*x) * sum(orbcoeff(0:norder)*hbasis(0:norder))**2
-    enddo ! i
-    !grid_P = exp(-(grid_x*xscale)**2)
-    grid_P = grid_P/sum(grid_P)
+    grid_P = 1.d0
 
     ! Loop over Newton's method iterations.
     do iter = 1, MAX_ITER
 
-      ! Report.
-      if (VERBOSE) then
-        write(6,*) '  Before iteration '//trim(i2s(iter))//':'
-        do i = 1, ngrid
-          write(6,*)'    Grid point #'//trim(i2s(i))//': x, P = ', &
-             &grid_x(i)*xscale, grid_P(i)
-        enddo ! i
-      endif ! VERBOSE
+      ! Evaluate required objects.
+      do i = 1, ngrid
+        x = grid_x(i)*xscale
+        call eval_hermite_poly_norm (norder, x, hbasis)
+        grid_orb(i) = exp(-0.5d0*x*x) * sum(orbcoeff(0:norder)*hbasis(0:norder))
+        grid_dorb(i) = exp(-0.5d0*x*x) * &
+           &sum(dorbcoeff(0:norder-1)*hbasis(0:norder-1)) - x*grid_orb(i)
+      enddo ! i
 
       ! Evaluate RHS of equations.
-      fvec = (/ ( sum(grid_P(1:ngrid)*grid_x(1:ngrid)**dble(i-1)) - &
-         &        xpower_expval(i-1)/xscale**dble(i-1), i=1,2*ngrid ) /)
+      fvec(1) = sum( grid_P(1:ngrid)*grid_orb(1:ngrid)**2 ) - 1.d0
+      fvec(2:2*ngrid) = (/ ( sum( grid_P(1:ngrid)*grid_orb(1:ngrid)**2*&
+         &                        ( grid_x(1:ngrid)**dble(i-1) - &
+         &                          xpower_expval(i-1)/xscale**dble(i-1) ) ), &
+         &                   i=2,2*ngrid ) /)
 
       ! Evaluate Jacobian.
       Jmat = 0.d0
-      Jmat(1,ngrid+1:2*ngrid) = 1.d0
-      Jmat(2,1:ngrid) = grid_P(1:ngrid)
-      Jmat(2,ngrid+1:2*ngrid) = grid_x(1:ngrid)
-      do i = 3, 2*ngrid
-        Jmat(i,1:ngrid) = dble(i-1)*grid_P(1:ngrid)*grid_x(1:ngrid)**dble(i-2)
-        Jmat(i,ngrid+1:2*ngrid) = grid_x(1:ngrid)**dble(i-1)
+      Jmat(1,1:ngrid) = grid_P(1:ngrid)*2.d0*grid_orb(1:ngrid)*&
+         &grid_dorb(1:ngrid)*xscale
+      Jmat(1,ngrid+1:2*ngrid) = grid_orb(1:ngrid)**2
+      do i = 2, 2*ngrid
+        Jmat(i,1:ngrid) = grid_P(1:ngrid) * &
+           &( dble(i-1)*grid_orb(1:ngrid)**2*grid_x(1:ngrid)**dble(i-2) + &
+           &  2.d0*grid_orb(1:ngrid)*grid_dorb(1:ngrid)*xscale* &
+           &  ( grid_x(1:ngrid)**dble(i-1) - &
+           &    xpower_expval(i-1)/xscale**dble(i-1) ) )
+        Jmat(i,ngrid+1:2*ngrid) = grid_orb(1:ngrid)**2 * &
+           &( grid_x(1:ngrid)**dble(i-1) - &
+           &  xpower_expval(i-1)/xscale**dble(i-1) )
       enddo ! i
 
       ! Obtain Newton's method step.
@@ -488,12 +522,14 @@ CONTAINS
       call dgetrs ('N', 2*ngrid, 1, Jmat, 2*ngrid, piv, fvec, 2*ngrid, ierr)
       if (ierr/=0) call quit ('DGETRS error '//trim(i2s(ierr))//'.')
 
+      ! FIXME - do line minimization
+
       ! Apply step.
       lambda = 1.d0
       do
         grid_P_test = grid_P - lambda*fvec(ngrid+1:2*ngrid)
         grid_x_test = grid_x - lambda*fvec(1:ngrid)
-        if (all(grid_P_test>=0.d0.and.grid_P_test<=1.d0) .and. &
+        if (all(grid_P_test>=0.d0) .and. &
          &all(grid_x_test(1:ngrid-1)<grid_x_test(2:ngrid)-0.1d0)) exit
         lambda = 0.8d0*lambda
       enddo
@@ -507,9 +543,9 @@ CONTAINS
         write(6,*) '  Iteration '//trim(i2s(iter))//':'
         write(6,*) '    Lambda    = ', lambda
         write(6,*) '    Disp norm = ', t1
+        write(6,*) '    Unscaled parameters:'
         do i = 1, ngrid
-          write(6,*)'    Grid point #'//trim(i2s(i))//': x, P = ', &
-             &grid_x(i), grid_P(i)
+          write(6,*) '      x,P #'//trim(i2s(i))//': ', grid_x(i), grid_P(i)
         enddo ! i
       endif ! VERBOSE
       if (t1<1.d-10) exit
@@ -517,7 +553,15 @@ CONTAINS
     enddo
     if (iter>MAX_ITER) write(6,*) '  Grid did not converge.'
 
+    ! Rescale grid parameters.
     grid_x = grid_x*xscale
+    do i = 1, ngrid
+      x = grid_x(i)
+      call eval_hermite_poly_norm (norder, x, hbasis)
+      grid_orb(i) = exp(-0.5d0*x*x) * sum(orbcoeff(0:norder)*hbasis(0:norder))
+    enddo ! i
+    grid_P = grid_P*grid_orb**2
+    grid_P = grid_P/sum(grid_P)
 
   END SUBROUTINE solve_grid_newton
 
