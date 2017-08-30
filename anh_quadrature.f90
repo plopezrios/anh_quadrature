@@ -31,16 +31,12 @@ CONTAINS
     INTEGER, ALLOCATABLE :: piv_hmatrix(:)
     ! Variables defining ground state of Hamiltonian.
     INTEGER norder
-    DOUBLE PRECISION e0
+    DOUBLE PRECISION e0, vratio
     DOUBLE PRECISION, ALLOCATABLE :: orbcoeff(:)
     ! The wave function converges at a given expansion order if its
-    ! variational energy is within relative REL_TOL or absolute tolerance
-    ! ABS_TOL of all of the variational energies obtained with the previous
-    ! NITER_CONVERGE expansion orders.
+    ! associated virial ratio is within VIRIAL_TOL of unity.
     INTEGER, PARAMETER :: MAX_NORDER = 200 ! FIXME - dsyev* hang at norder=202
-    INTEGER, PARAMETER :: NITER_CONVERGE = 6
-    DOUBLE PRECISION, PARAMETER :: REL_TOL = sqrt(epsilon(1.d0))
-    DOUBLE PRECISION, PARAMETER :: ABS_TOL = 1.d-6
+    DOUBLE PRECISION, PARAMETER :: VIRIAL_TOL = 1.d-9
     ! Variables for quadrature grid.
     INTEGER ngrid
     DOUBLE PRECISION, ALLOCATABLE :: xpower_expval(:)
@@ -48,7 +44,7 @@ CONTAINS
     ! Mist local variables.
     CHARACTER(2048) line
     INTEGER i, ivec, iexp, igrid, ierr
-    DOUBLE PRECISION t1, inv_sqrt_omega, e0vec(0:NITER_CONVERGE-1)
+    DOUBLE PRECISION t1, inv_sqrt_omega
 
     ! Get V coefficients and norder.
     write(6,*) 'Enter coefficients c_k of expansion of V(u) in natural powers,'
@@ -82,7 +78,7 @@ CONTAINS
     !   oscillator.
     omega = sqrt(2.d0)*vcoeff_nat(norder_v)**(2.d0/dble(norder_v+2))
     inv_sqrt_omega = 1.d0/sqrt(omega)
-    write(6,*) 'Omega (a.u.) = ', omega
+    write(6,*) 'Omega (a.u.)    = ', omega
 
     ! Convert potential to dimensionless scale, and expand v(x) in normalized
     ! Hermite polynomials.
@@ -94,28 +90,25 @@ CONTAINS
        &vcoeff_nat, vcoeff)
 
     ! Converge trial ground-state wave function.
-    e0vec(0:NITER_CONVERGE-1) = (/ (dble(i)*1.d7, i=1,NITER_CONVERGE) /)
     ivec = 0
     do norder = max(norder_v,2), MAX_NORDER
       if (allocated(orbcoeff)) deallocate (orbcoeff)
       allocate (orbcoeff(0:norder))
       orbcoeff = 0.d0
-      call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff)
-      ivec = modulo(ivec-1,NITER_CONVERGE)
-      if (abs(e0vec(ivec)-e0)<REL_TOL*abs(e0)) exit
-      if (abs(e0vec(ivec)-e0)<ABS_TOL) exit
-      e0vec(ivec) = e0
+      call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
+      if (abs(vratio-1.d0)<VIRIAL_TOL) exit
     enddo ! norder
-    if (norder>MAX_NORDER) call quit('Failed to converge energy to target &
-       &accuracy.')
+    if (norder>MAX_NORDER) then
+      write(6,*) 'Virial ratio    = ',vratio
+      call quit('Failed to converge virial ratio to target accuracy.')
+    endif
 
-    ! Solve again with final expansion order, make plot and report.
-    norder = norder-NITER_CONVERGE
-    call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, nplot=10)
-    write(6,*) 'Ground state energy converges at expansion order '//&
-       &trim(i2s(norder))//'.'
-    write(6,*) 'E0 (non-dim) = ', e0
-    write(6,*) 'E0 (a.u.)    = ', e0*omega
+    ! Solve again to make plot, and report.
+    call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio, &
+       &nplot=10)
+    write(6,*) 'Expansion order = '//trim(i2s(norder))
+    write(6,*) 'E0 (a.u.)       = ', e0*omega
+    write(6,*) 'Virial ratio    = ', vratio
     write(6,*)
 
     ! Loop over quadrature grid sizes.
@@ -151,7 +144,8 @@ CONTAINS
   END SUBROUTINE main
 
 
-  SUBROUTINE get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, nplot)
+  SUBROUTINE get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, &
+     &vratio, nplot)
     !---------------------------------------------------------!
     ! Given a one-dimensional (anharmonic) potential,         !
     !                                                         !
@@ -177,7 +171,7 @@ CONTAINS
     IMPLICIT NONE
     INTEGER, INTENT(in) :: norder, norder_v
     DOUBLE PRECISION, INTENT(in) :: vcoeff(0:norder_v)
-    DOUBLE PRECISION, INTENT(inout) :: e0, orbcoeff(0:norder)
+    DOUBLE PRECISION, INTENT(inout) :: e0, orbcoeff(0:norder), vratio
     INTEGER, INTENT(in), OPTIONAL :: nplot
     ! Eigenproblem arrays.
     DOUBLE PRECISION alpha(0:norder), hmatrix(0:norder,0:norder), &
@@ -200,9 +194,11 @@ CONTAINS
     DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
     DOUBLE PRECISION, PARAMETER :: fourth_root_pi_over_sqrt8 = &
        &                           pi**0.25d0*sqrt(0.125d0)
+    ! Virial ratio evaluation.
+    DOUBLE PRECISION vircoeff(0:norder_v), xdv_expval, t_expval
     ! Misc local variables.
     INTEGER i, j, k, iplot, ierr
-    DOUBLE PRECISION t1
+    DOUBLE PRECISION t1, t2
 
     ! Get numerical constants to speed up operations.
     log_fact(0:norder) = eval_log_fact( (/ (i, i=0,norder) /) )
@@ -239,7 +235,8 @@ CONTAINS
     deallocate(lapack_work, lapack_iwork)
 
     ! Normalize the wave function, flush small coefficients to zero, normalize
-    ! the wave function again, and recalculate the variational energy.
+    ! the wave function again, and recalculate the variational energy for all
+    ! eigenstates.
     do i = 0, norder
       t1 = 1.d0/sqrt(sum(cmatrix(0:norder,i)**2))
       cmatrix(0:norder,i) = t1*cmatrix(0:norder,i)
@@ -256,6 +253,29 @@ CONTAINS
         alpha(i) = alpha(i)+t1
       enddo ! j
     enddo ! i
+
+    ! Evaluate the virial ratio for the ground state.
+    vircoeff = 0.d0
+    do i = 0, norder_v
+      if (i<norder_v-1) vircoeff(i) = vircoeff(i) + &
+         &vcoeff(i+2)*sqrt(dble((i+1)*(i+2)))
+      if (i>1) vircoeff(i) = vircoeff(i) + vcoeff(i)*dble(i)
+    enddo ! i
+    xdv_expval = 0.d0
+    t_expval = 0.d0
+    do i = 0, norder
+      t1 = eval_comb_Gamma (norder_v, i, i, vircoeff, log_fact)
+      t2 = dble(i)+0.25d0 - fourth_root_pi_over_sqrt8*eval_Gamma(i,i,2,log_fact)
+      xdv_expval = xdv_expval + t1*cmatrix(i,0)**2
+      t_expval = t_expval + t2*cmatrix(i,0)**2
+      do j = i+1, norder
+        t1 = eval_comb_Gamma (norder_v, i, j, vircoeff, log_fact)
+        t2 = -fourth_root_pi_over_sqrt8*eval_Gamma(i,j,2,log_fact)
+        xdv_expval = xdv_expval + 2.d0*t1*cmatrix(i,0)*cmatrix(j,0)
+        t_expval = t_expval + 2.d0*t2*cmatrix(i,0)*cmatrix(j,0)
+      enddo ! j
+    enddo ! i
+    vratio = 2.d0*t_expval/xdv_expval
 
     ! Return ground-state components.
     ! FIXME - if ground state is degenerate, how do we choose which
