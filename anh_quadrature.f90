@@ -25,10 +25,7 @@ CONTAINS
     ! System definition.
     INTEGER norder_v
     DOUBLE PRECISION, ALLOCATABLE :: vcoeff_nat(:), vcoeff(:)
-    DOUBLE PRECISION omega
-    ! Conversion from natural polynomials to Hermite polynomials.
-    DOUBLE PRECISION, ALLOCATABLE :: lu_hmatrix(:,:)
-    INTEGER, ALLOCATABLE :: piv_hmatrix(:)
+    DOUBLE PRECISION ucentre, omega
     ! Variables defining ground state of Hamiltonian.
     INTEGER norder
     DOUBLE PRECISION e0, vratio
@@ -50,7 +47,7 @@ CONTAINS
     ! Mist local variables.
     CHARACTER(2048) line
     INTEGER i, iexp, igrid, ierr
-    DOUBLE PRECISION t1, inv_sqrt_omega
+    DOUBLE PRECISION t1
 
     ! Get V coefficients and norder.
     write(6,*) 'Enter coefficients c_k of expansion of V(u) in natural powers,'
@@ -74,23 +71,20 @@ CONTAINS
     if (vcoeff_nat(norder_v)<epsilon(1.d0)) &
        &call quit ('Leading term of V(u) must have a positive coefficient.')
 
-    ! Work out optimal omega by minimizing virial ratio error for a wave
-    ! function of fixed expansion order.
-    call obtain_omega (norder_v, vcoeff_nat, 2*norder_v, omega)
-    inv_sqrt_omega = 1.d0/sqrt(omega)
+    ! Internally, we work in a dimensionless scale where x = sqrt(omega)*u
+    ! and energies are e = E/omega, where omega is optimized so as to yield
+    ! the best solution at a fixed expansion order.  Also, we shift the
+    ! potential self-consistently so that <x> = 0 at this expansion order.
+    ucentre = 0.d0
+    call obtain_ucentre_omega (norder_v, vcoeff_nat, 20, ucentre, omega)
+    write(6,*) 'Centre          = ', ucentre
     write(6,*) 'Omega (a.u.)    = ', omega
 
-    ! We work in a dimensionless scale where x = sqrt(omega)*u and energies
-    ! are e = E/omega.  Convert potential to dimensionless scale, and expand
-    ! v(x) in normalized Hermite polynomials.
-    vcoeff_nat = (/ (vcoeff_nat(i)*inv_sqrt_omega**dble(i+2), i=0,norder_v) /)
-    allocate(lu_hmatrix(0:norder_v,0:norder_v), piv_hmatrix(0:norder_v), &
-       &vcoeff(0:norder_v))
-    call lu_decom_hermite_matrix (norder_v, lu_hmatrix, piv_hmatrix)
-    call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
-       &vcoeff_nat, vcoeff)
+    ! Get internal representation of V in normalized Hermite polynomials.
+    allocate(vcoeff(0:norder_v))
+    call transform_potential (norder_v, vcoeff_nat, ucentre, omega, vcoeff)
 
-    ! Converge trial ground-state wave function.
+    ! Converge trial ground-state wave function with expansion order.
     do norder = max(norder_v,2), MAX_NORDER
       if (allocated(orbcoeff)) deallocate (orbcoeff)
       allocate (orbcoeff(0:norder))
@@ -136,13 +130,14 @@ CONTAINS
       call eval_hermite_poly_norm (norder, x, hbasis)
       t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
       psix2 = exp(-x*x)*t1*t1
-      !fx = cos(x)
-      !fx = 1.d0 / (1.d0 + x**2)
-      fx = exp(-(x-0.5d0)**2)
+      !fx = cos(x/sqrt(omega))
+      !fx = 1.d0 / (1.d0 + x**2/omega)
+      fx = exp(-(x/sqrt(omega)-0.5d0)**2)
       fexpval = fexpval + fx*psix2*dx
     enddo ! i
-    write(6,*) '[x] = ', xl, xr
-    write(6,*) '<f> = ', fexpval
+    write(6,*) '<f>             = ', fexpval
+    write(6,*) 'Int. range      = [', xl, ':', xr,']'
+    write(6,*)
     write(13,*) 0, fexpval
     write(13,*) MAX_NGRID, fexpval
     write(13,'(a)') '&'
@@ -181,9 +176,9 @@ CONTAINS
         fexpval = 0.d0
         do igrid = 1, ngrid
           x = grid_x(igrid)
-          !fx = cos(x)
-          !fx = 1.d0 / (1.d0 + x**2)
-          fx = exp(-(x-0.5d0)**2)
+          !fx = cos(x/sqrt(omega))
+          !fx = 1.d0 / (1.d0 + x**2/omega)
+          fx = exp(-(x/sqrt(omega)-0.5d0)**2)
           fexpval = fexpval + grid_P(igrid)*fx
         enddo ! igrid
         write(6,*)'  <f> = ', fexpval
@@ -197,114 +192,208 @@ CONTAINS
   END SUBROUTINE main
 
 
-  SUBROUTINE obtain_omega (norder_v, vcoeff_nat, norder, omega)
+  SUBROUTINE obtain_ucentre_omega (norder_v, vcoeff_nat, norder, ucentre, omega)
     !----------------------------------------------------------!
     ! Given the natural-polynomial coefficients of a potential !
-    ! VCOEFF_NAT(0:NORDER_V), obtain the value of omega that   !
-    ! minimizes the virial ratio error for a trial wave        !
-    ! function of order NORDER.                                !
+    ! VCOEFF_NAT(0:NORDER_V), obtain the values of ucentre and !
+    ! omega that minimizes the variational energy or virial    !
+    ! ratio error for a trial wave function of order NORDER.   !
     !----------------------------------------------------------!
     IMPLICIT NONE
     INTEGER, INTENT(in) :: norder_v, norder
     DOUBLE PRECISION, INTENT(in) :: vcoeff_nat(0:norder_v)
-    DOUBLE PRECISION, INTENT(inout) :: omega
+    DOUBLE PRECISION, INTENT(inout) :: ucentre, omega
     DOUBLE PRECISION, PARAMETER :: OMEGA_TOL = 1.d-9
-    DOUBLE PRECISION lu_hmatrix(0:norder_v,0:norder_v), vcoeff(0:norder_v), &
-       &orbcoeff(0:norder), e0, vratio
+    LOGICAL, PARAMETER :: SET_OMEGA_BY_X2 = .false.
+    LOGICAL, PARAMETER :: MINIMIZE_E = .true.
+    INTEGER, PARAMETER :: MAX_ITER_CENTRE = 10
+    DOUBLE PRECISION vcoeff(0:norder_v), orbcoeff(0:norder), e0, vratio, &
+       &ucentre_prev, omega_prev, omega_init
     DOUBLE PRECISION xu, xv, xw, fu, fv, fw, x, f
-    INTEGER i, piv_hmatrix(0:norder_v)
+    INTEGER iter
     LOGICAL rejected
-
-    ! Prepare Hermite transformation matrix.
-    call lu_decom_hermite_matrix (norder_v, lu_hmatrix, piv_hmatrix)
 
     ! Obtain initial guess for omega so that:
     ! * Scaling a potential V(u) by a multiplicative constant results in the
     !   same dimensionless potential v(x).
     ! * omega is the frequency for a harmonic potential.
-    xv = sqrt(2.d0)*vcoeff_nat(norder_v)**(2.d0/dble(norder_v+2))
-    call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
-       &(/ ( vcoeff_nat(i)*xv**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
-       &vcoeff)
-    call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
-    fv = abs(vratio-1.d0)
+    omega_init = sqrt(2.d0)*vcoeff_nat(norder_v)**(2.d0/dble(norder_v+2))
 
-    ! Bracket to the left.
-    xw = 0.d0
-    fw = -1.d0
-    do
-      xu = 0.9d0*xv
-      call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
-         &(/ ( vcoeff_nat(i)*xu**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
-         &vcoeff)
-      call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
-      fu = abs(vratio-1.d0)
-      if (fu>fv) exit
-      xw = xv
-      fw = fv
-      xv = xu
-      fv = fu
-    enddo
+    ! Initialize ucentre.
+    ucentre = 0.d0
 
-    ! Bracket to the right.
-    if (fw<fu) then
-      do
-        xw = 1.1d0*xv
-        call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
-           &(/ ( vcoeff_nat(i)*xw**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
-           &vcoeff)
+    if (SET_OMEGA_BY_X2) then
+
+      ! Loop over self-consistence cycles.
+      omega = omega_init
+      do iter = 1, MAX_ITER_CENTRE
+
+        ! Evaluate <x> at this omega.
+        call transform_potential (norder_v, vcoeff_nat, ucentre, omega, vcoeff)
         call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
-        fw = abs(vratio-1.d0)
-        if (fw>fv) exit
-        xu = xv
-        fu = fv
-        xv = xw
-        fv = fw
-      enddo
-    endif
+        ucentre_prev = ucentre
+        omega_prev = omega
+        ucentre = ucentre_prev - &
+           &eval_xpower_expval (norder, orbcoeff, 1)/sqrt(omega_prev)
+        omega = 0.5d0 * omega_prev/eval_xpower_expval (norder, orbcoeff, 2)
+        if (abs(ucentre-ucentre_prev)<1.d-10.and.abs(omega-omega_prev)<1.d-10) &
+           &exit
 
-    ! Zone in on minimum.
-    do
-      call parabolic_min (xu, xv, xw, fu, fv, fw, x, f, rejected)
-      if (rejected) exit
-      if (x<=xu.or.x>=xw) exit
-      call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
-         &(/ ( vcoeff_nat(i)*x**(-0.5d0*dble(i+2)), i=0,norder_v ) /), &
-         &vcoeff)
-      call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
-      f = abs(vratio-1.d0)
-      if (f<fv) then
-        if (x<xv) then
+      enddo
+
+    else ! .not. SET_OMEGA_BY_X2
+
+      ! Loop over self-consistence cycles.
+      do iter = 1, MAX_ITER_CENTRE
+
+        ! Obtain initial guess for omega so that:
+        ! * Scaling a potential V(u) by a multiplicative constant results in the
+        !   same dimensionless potential v(x).
+        ! * omega is the frequency for a harmonic potential.
+        xv = omega_init
+        call transform_potential (norder_v, vcoeff_nat, ucentre, xv, vcoeff)
+        call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
+        if (MINIMIZE_E) then
+          fv = e0*xv
+        else
+          fv = abs(vratio-1.d0)
+        endif
+
+        ! Perform line minimization for omega.
+
+        ! Bracket to the left.
+        xw = 0.d0
+        fw = fv-1.d0
+        do
+          xu = 0.9d0*xv
+          call transform_potential (norder_v, vcoeff_nat, ucentre, xu, vcoeff)
+          call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
+          if (MINIMIZE_E) then
+            fu = e0*xu
+          else
+            fu = abs(vratio-1.d0)
+          endif
+          if (fu>fv) exit
           xw = xv
           fw = fv
-        elseif (x>xv) then
-          xu = xv
-          fu = fv
-        else
-          exit
-        endif
-        xv = x
-        fv = f
-      elseif (f>fv) then
-        if (x<xv) then
-          xu = x
-          fu = f
-        elseif (x>xv) then
-          xw = x
-          fw = f
-        else
-          exit
-        endif
-      else
-        exit
-      endif
-      if (xw-xu<OMEGA_TOL) exit
-    enddo
+          xv = xu
+          fv = fu
+        enddo
 
-    ! Return position of minimum.
-    omega = xv
+        ! Bracket to the right.
+        if (fw<fu) then
+          do
+            xw = 1.1d0*xv
+            call transform_potential (norder_v, vcoeff_nat, ucentre, xw, &
+               &vcoeff)
+            call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, &
+               &vratio)
+            if (MINIMIZE_E) then
+              fw = e0*xw
+            else
+              fw = abs(vratio-1.d0)
+            endif
+            if (fw>fv) exit
+            xu = xv
+            fu = fv
+            xv = xw
+            fv = fw
+          enddo
+        endif
 
-  END SUBROUTINE obtain_omega
+        ! Zone in on minimum.
+        do
+          call parabolic_min (xu, xv, xw, fu, fv, fw, x, f, rejected)
+          if (rejected) exit
+          if (x<=xu.or.x>=xw) exit
+          call transform_potential (norder_v, vcoeff_nat, ucentre, x, vcoeff)
+          call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, &
+             &vratio)
+          if (MINIMIZE_E) then
+            f = e0*x
+          else
+            f = abs(vratio-1.d0)
+          endif
+          if (f<fv) then
+            if (x<xv) then
+              xw = xv
+              fw = fv
+            elseif (x>xv) then
+              xu = xv
+              fu = fv
+            else
+              exit
+            endif
+            xv = x
+            fv = f
+          elseif (f>fv) then
+            if (x<xv) then
+              xu = x
+              fu = f
+            elseif (x>xv) then
+              xw = x
+              fw = f
+            else
+              exit
+            endif
+          else
+            exit
+          endif
+          if (xw-xu<OMEGA_TOL) exit
+        enddo
+
+        ! Return position of minimum.
+        omega = xv
+
+        ! Evaluate <x> at this omega and shift ucentre by it.
+        call transform_potential (norder_v, vcoeff_nat, ucentre, omega, vcoeff)
+        call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
+        ucentre_prev = ucentre
+        ucentre = ucentre_prev - &
+           &eval_xpower_expval (norder, orbcoeff, 1)/sqrt(omega)
+        if (abs(ucentre-ucentre_prev)<1.d-10) exit
+
+      enddo
+
+    endif ! SET_OMEGA_BY_X2 or not
+
+  END SUBROUTINE obtain_ucentre_omega
+
+
+  SUBROUTINE transform_potential (norder_v, vcoeff_nat, ucentre, omega, vcoeff)
+    !---------------------------------------------------------!
+    ! Given a function represented as a natural polynomial of !
+    ! coefficients VCOEFF_NAT(0:NORDER_V), apply a horizontal !
+    ! shift UCENTRE and rescale factor sqrt(OMEGA), and       !
+    ! re-represent it in normalized Hermite polynomials of    !
+    ! coefficients VCOEFF(0:NORDER_V).                        !
+    !---------------------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: norder_v
+    DOUBLE PRECISION, INTENT(in) :: vcoeff_nat(0:norder_v), ucentre, omega
+    DOUBLE PRECISION, INTENT(inout) :: vcoeff(0:norder_v)
+    DOUBLE PRECISION lu_hmatrix(0:norder_v,0:norder_v), &
+       &vcoeff_nat1(0:norder_v), vcoeff_nat2(0:norder_v)
+    INTEGER i, j, piv_hmatrix(0:norder_v)
+
+    ! Prepare Hermite transformation matrix.
+    call lu_decom_hermite_matrix (norder_v, lu_hmatrix, piv_hmatrix)
+
+    ! Apply shift.
+    do i = 0, norder_v
+      vcoeff_nat1(i) = sum( (/ ( rchoose(i+j,i)*(-ucentre)**j*vcoeff_nat(i+j), &
+          &                      j=0,norder_v-i ) /) )
+    enddo ! i
+
+    ! Apply change of variable.
+    vcoeff_nat2 = (/ ( vcoeff_nat1(i)*omega**(-0.5d0*dble(i+2)), &
+       &               i=0,norder_v ) /)
+
+    ! Perform conversion.
+    call convert_natpoly_to_hermite (norder_v, lu_hmatrix, piv_hmatrix, &
+       &vcoeff_nat2, vcoeff)
+
+  END SUBROUTINE transform_potential
 
 
   SUBROUTINE get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, &
@@ -1000,6 +1089,21 @@ CONTAINS
     y0 = (a*x0+b)*x0 + c
 
   END SUBROUTINE parabolic_min
+
+
+  DOUBLE PRECISION FUNCTION rchoose(a,b)
+    !-------------------------------------!
+    ! This function returns a choose b as !
+    ! a floating-point real number.       !
+    !-------------------------------------!
+    IMPLICIT NONE
+    INTEGER,INTENT(in) :: a,b
+    INTEGER i
+    rchoose=1.d0
+    do i=1,b
+      rchoose=rchoose*(dble(a+1-i)/dble(i))
+    enddo ! i
+  END FUNCTION rchoose
 
 
   ! String utilities.
