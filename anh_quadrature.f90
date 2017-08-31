@@ -486,15 +486,24 @@ CONTAINS
     if (ierr/=0) call quit ('DSYEVD error '//trim(i2s(ierr))//'.')
     deallocate(lapack_work, lapack_iwork)
 
-    ! Normalize the wave function, flush small coefficients to zero, normalize
-    ! the wave function again, and recalculate the variational energy for all
-    ! eigenstates.
+    ! Loop over all eigenstates to tidy them up.
     do i = 0, norder
+      ! Normalize the wave function.
       t1 = 1.d0/sqrt(sum(cmatrix(0:norder,i)**2))
       cmatrix(0:norder,i) = t1*cmatrix(0:norder,i)
+      ! Flush small coefficients to zero.
       where (abs(cmatrix(0:norder,i)) < TOL_ZERO) cmatrix(0:norder,i) = 0.d0
+      ! Normalize the wave function again, and make first coefficient positive
+      ! while at it.
       t1 = 1.d0/sqrt(sum(cmatrix(0:norder,i)**2))
+      do j = 0, norder
+        if (abs(cmatrix(j,i)) > TOL_ZERO) then
+          if (cmatrix(j,i)<0.d0) t1 = -t1
+          exit
+        endif
+      enddo ! j
       cmatrix(0:norder,i) = t1*cmatrix(0:norder,i)
+      ! Recalculate the variational energy.
       alpha(i) = 0.d0
       do j = 0, norder
         t1 = 0.d0
