@@ -44,7 +44,7 @@ CONTAINS
     INTEGER, PARAMETER :: MAX_NGRID = 8
     INTEGER, PARAMETER :: NPOINT_BRUTE_FORCE = 10000
     DOUBLE PRECISION, PARAMETER :: CDF_TOL = 1.d-8
-    DOUBLE PRECISION x, fu(NFUNCTION), fint(NFUNCTION), &
+    DOUBLE PRECISION x, u, fu(NFUNCTION), fint(NFUNCTION), &
        &fexpval(NFUNCTION,MAX_NGRID), dx, xl, xr
     DOUBLE PRECISION, ALLOCATABLE :: hbasis(:)
     LOGICAL grid_failed(MAX_NGRID)
@@ -117,9 +117,10 @@ CONTAINS
     fint = 0.d0
     do i = 0, NPOINT_BRUTE_FORCE
       x = xl + (dble(i)/dble(NPOINT_BRUTE_FORCE))*(xr-xl)
+      u = x*inv_sqrt_omega - ucentre
       call eval_hermite_poly_norm (norder, x, hbasis)
       t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
-      call eval_test_functions (x*inv_sqrt_omega, fu)
+      call eval_test_functions (u, fu)
       fint = fint + fu*exp(-x*x)*t1*t1*dx
     enddo ! i
     do i = 1, NFUNCTION
@@ -134,29 +135,31 @@ CONTAINS
     ! Plot V(u).
     do i = 0, PLOT_NPOINT
       x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
+      u = x*inv_sqrt_omega - ucentre
       call eval_hermite_poly_norm (norder_v, x, hbasis)
-      write(14,*) x*inv_sqrt_omega+ucentre, &
-         &sum(vcoeff(0:norder_v)*hbasis(0:norder_v))*omega
+      write(14,*) u, sum(vcoeff(0:norder_v)*hbasis(0:norder_v))*omega
     enddo ! i
     write(14,'(a)') '&'
     ! Plot target functions.
     do j = 1, NFUNCTION
       do i = 0, PLOT_NPOINT
         x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
-        call eval_test_functions (x*inv_sqrt_omega, fu)
-        write(14,*) x*inv_sqrt_omega, fu(j)
+        u = x*inv_sqrt_omega - ucentre
+        call eval_test_functions (u, fu)
+        write(14,*) u, fu(j)
       enddo ! i
       write(14,'(a)') '&'
     enddo ! j
     ! Plot Psi_0(u).
-    write(14,*) xl*inv_sqrt_omega+ucentre, e0*omega
-    write(14,*) xr*inv_sqrt_omega+ucentre, e0*omega
+    write(14,*) xl*inv_sqrt_omega - ucentre, e0*omega
+    write(14,*) xr*inv_sqrt_omega - ucentre, e0*omega
     write(14,'(a)') '&'
     do i = 0, PLOT_NPOINT
       x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
+      u = x*inv_sqrt_omega - ucentre
       call eval_hermite_poly_norm (norder, x, hbasis)
-      write(14,*) x*inv_sqrt_omega, e0*omega+omega**(0.25d0) * &
-         &exp(-0.5d0*x*x)*sum(orbcoeff(0:norder)*hbasis(0:norder))
+      write(14,*) u, e0*omega + omega**0.25d0*exp(-0.5d0*x*x)*&
+         &                      sum(orbcoeff(0:norder)*hbasis(0:norder))
     enddo ! i
     write(14,'(a)') '&'
     deallocate (hbasis)
@@ -182,21 +185,23 @@ CONTAINS
         grid_failed(ngrid) = .true.
       else
         ! Report success.
-        write(12,*)grid_x(1)-1.d0, dble(ngrid-2)
         do igrid = 1, ngrid
+          u = grid_x(igrid)*inv_sqrt_omega - ucentre
+          if (igrid==1) write(12,*) u-1.d0, dble(ngrid-2)
           write(6,*)'  u_'//trim(i2s(igrid))//', P_'//trim(i2s(igrid))//&
-             &' = ', grid_x(igrid)*inv_sqrt_omega, grid_P(igrid)
-          write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2)
-          write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2) + grid_P(igrid)
-          write(12,*) grid_x(igrid)+0.1d0, dble(ngrid-2) + grid_P(igrid)
-          write(12,*) grid_x(igrid)+0.1d0, dble(ngrid-2)
+             &' = ', u, grid_P(igrid)
+          write(12,*) u - 0.1d0, dble(ngrid-2)
+          write(12,*) u - 0.1d0, dble(ngrid-2) + grid_P(igrid)
+          write(12,*) u + 0.1d0, dble(ngrid-2) + grid_P(igrid)
+          write(12,*) u + 0.1d0, dble(ngrid-2)
+          if (igrid==ngrid) write(12,*) u+1.d0, dble(ngrid-2)
         enddo ! igrid
-        write(12,*)grid_x(ngrid)+1.d0, dble(ngrid-2)
         write(12,'(a)')'&'
         ! Evaluate expectation value of potential energy using this grid.
         do igrid = 1, ngrid
           x = grid_x(igrid)
-          call eval_test_functions (x*inv_sqrt_omega, fu)
+          u = x*inv_sqrt_omega - ucentre
+          call eval_test_functions (u, fu)
           fexpval(:,ngrid) = fexpval(:,ngrid) + grid_P(igrid)*fu(:)
         enddo ! igrid
         write(6,*)'  Integration tests:'
