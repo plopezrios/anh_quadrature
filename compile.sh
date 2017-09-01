@@ -13,6 +13,9 @@ vortex*)
   module load intel impi
   cc=mpiicc
   f90=mpiifort ;;
+pc*.tcm.*)
+  cc=gcc
+  f90=gfortran ;;
 *)
   cc=mpicc
   f90=mpif90 ;;
@@ -20,15 +23,14 @@ esac
 
 # Choose compiler options.
 case "$f90" in
-mpif90*|mpgfortran*)
+mpif90*|mpgfortran*|gfortran*)
   if [ "$1" = -d ] ; then
     opts="-Wall -Wextra -fimplicit-none -O0 -fbounds-check -g -pg -pedantic\
        -fbacktrace -fcray-pointer"
   else
-    opts="-Ofast -fprotect-parens -march=native -fcray-pointer"
     opts="-O2 -fprotect-parens -march=native -fcray-pointer"
   fi ;;
-mpifort*|mpiifort*)
+mpifort*|mpiifort*|ifort*)
   if [ "$1" = -d ] ; then
     opts="-check all -check noarg_temp_created -fp-stack-check -g -O0\
        -implicitnone -std95 -traceback -warn all,nounused -debug all -ftrapuv\
@@ -37,7 +39,7 @@ mpifort*|mpiifort*)
     opts="-O3 -no-prec-div -no-prec-sqrt -funroll-loops -no-fp-port -ip\
        -complex-limited-range -assume protect_parens -assume buffered_io"
   fi ;;
-mpnagfor*)
+mpnagfor*|nagfor*)
   if [ "$1" = -d ] ; then
     opts="-g -C=all -colour -f95 -strict95 -u -v -gline -nan\
        -no_underflow_warning -w=uda -O0"
