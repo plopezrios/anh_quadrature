@@ -26,6 +26,7 @@ mpif90*|mpgfortran*)
        -fbacktrace -fcray-pointer"
   else
     opts="-Ofast -fprotect-parens -march=native -fcray-pointer"
+    opts="-O2 -fprotect-parens -march=native -fcray-pointer"
   fi ;;
 mpifort*|mpiifort*)
   if [ "$1" = -d ] ; then

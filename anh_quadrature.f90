@@ -41,7 +41,7 @@ CONTAINS
     ! Evaluation of expectation value of v(x).
     INTEGER, PARAMETER :: PLOT_NPOINT = 200
     INTEGER, PARAMETER :: NFUNCTION = 3
-    INTEGER, PARAMETER :: MAX_NGRID = 10
+    INTEGER, PARAMETER :: MAX_NGRID = 8
     INTEGER, PARAMETER :: NPOINT_BRUTE_FORCE = 10000
     DOUBLE PRECISION, PARAMETER :: CDF_TOL = 1.d-8
     DOUBLE PRECISION x, fu(NFUNCTION), fint(NFUNCTION), &
@@ -149,9 +149,9 @@ CONTAINS
       write(14,'(a)') '&'
     enddo ! j
     ! Plot Psi_0(u).
-    !write(14,*) xl*inv_sqrt_omega+ucentre, e0*omega
-    !write(14,*) xr*inv_sqrt_omega+ucentre, e0*omega
-    !write(14,'(a)') '&'
+    write(14,*) xl*inv_sqrt_omega+ucentre, e0*omega
+    write(14,*) xr*inv_sqrt_omega+ucentre, e0*omega
+    write(14,'(a)') '&'
     do i = 0, PLOT_NPOINT
       x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
       call eval_hermite_poly_norm (norder, x, hbasis)
