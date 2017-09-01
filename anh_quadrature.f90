@@ -40,8 +40,8 @@ CONTAINS
     DOUBLE PRECISION, ALLOCATABLE :: grid_x(:), grid_p(:)
     ! Evaluation of expectation value of v(x).
     INTEGER, PARAMETER :: PLOT_NPOINT = 200
-    INTEGER, PARAMETER :: NFUNCTION = 5
-    INTEGER, PARAMETER :: MAX_NGRID = 12
+    INTEGER, PARAMETER :: NFUNCTION = 6
+    INTEGER, PARAMETER :: MAX_NGRID = 10
     INTEGER, PARAMETER :: NPOINT_BRUTE_FORCE = 10000
     DOUBLE PRECISION, PARAMETER :: CDF_TOL = 1.d-8
     DOUBLE PRECISION x, u, fu(NFUNCTION), fint(NFUNCTION), &
@@ -1028,12 +1028,13 @@ CONTAINS
     !---------------------------------------------------------!
     IMPLICIT NONE
     DOUBLE PRECISION, INTENT(in) :: u
-    DOUBLE PRECISION, INTENT(inout) :: f(5)
+    DOUBLE PRECISION, INTENT(inout) :: f(6)
     f(1) = exp(-(u+0.5)**2)
     f(2) = 1.d0 / (1.d0 + 5.d0*(u-0.5d0)**2)
     f(3) = 0.5d0+0.5d0*cos(4.d0*u)
     f(4) = u**2
     f(5) = 0.25d0-u**2+u**4
+    f(6) = abs(u)
   END SUBROUTINE eval_test_functions
 
 
