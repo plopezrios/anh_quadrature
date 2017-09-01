@@ -25,7 +25,7 @@ CONTAINS
     ! System definition.
     INTEGER norder_v
     DOUBLE PRECISION, ALLOCATABLE :: vcoeff_nat(:), vcoeff(:)
-    DOUBLE PRECISION ucentre, omega
+    DOUBLE PRECISION ucentre, omega, inv_sqrt_omega
     ! Variables defining ground state of Hamiltonian.
     INTEGER norder
     DOUBLE PRECISION e0, vratio
@@ -39,14 +39,18 @@ CONTAINS
     DOUBLE PRECISION, ALLOCATABLE :: xpower_expval(:)
     DOUBLE PRECISION, ALLOCATABLE :: grid_x(:), grid_p(:)
     ! Evaluation of expectation value of v(x).
-    DOUBLE PRECISION x, fx, fexpval, dx, xl, xr, psix2
-    DOUBLE PRECISION, ALLOCATABLE :: hbasis(:)
+    INTEGER, PARAMETER :: PLOT_NPOINT = 200
+    INTEGER, PARAMETER :: NFUNCTION = 3
+    INTEGER, PARAMETER :: MAX_NGRID = 10
     INTEGER, PARAMETER :: NPOINT_BRUTE_FORCE = 10000
-    INTEGER, PARAMETER :: MAX_NGRID = 20
-    DOUBLE PRECISION, PARAMETER :: PSI2_TOL = 1.d-12
-    ! Mist local variables.
+    DOUBLE PRECISION, PARAMETER :: CDF_TOL = 1.d-8
+    DOUBLE PRECISION x, fu(NFUNCTION), fint(NFUNCTION), &
+       &fexpval(NFUNCTION,MAX_NGRID), dx, xl, xr
+    DOUBLE PRECISION, ALLOCATABLE :: hbasis(:)
+    LOGICAL grid_failed(MAX_NGRID)
+    ! Misc local variables.
     CHARACTER(2048) line
-    INTEGER i, iexp, igrid, ierr
+    INTEGER i, j, iexp, igrid, ierr
     DOUBLE PRECISION t1
 
     ! Get V coefficients and norder.
@@ -76,7 +80,8 @@ CONTAINS
     ! the best solution at a fixed expansion order.  Also, we shift the
     ! potential self-consistently so that <x> = 0 at this expansion order.
     ucentre = 0.d0
-    call obtain_ucentre_omega (norder_v, vcoeff_nat, 20, ucentre, omega)
+    call obtain_ucentre_omega (norder_v, vcoeff_nat, 40, ucentre, omega)
+    inv_sqrt_omega = 1.d0/sqrt(omega)
     write(6,*) 'Centre          = ', ucentre
     write(6,*) 'Omega (a.u.)    = ', omega
 
@@ -86,18 +91,17 @@ CONTAINS
 
     ! Converge trial ground-state wave function with expansion order.
     do norder = max(norder_v,2), MAX_NORDER
-      if (allocated(orbcoeff)) deallocate (orbcoeff)
       allocate (orbcoeff(0:norder))
-      orbcoeff = 0.d0
       call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
+      deallocate (orbcoeff)
       if (abs(vratio-1.d0)<VIRIAL_TOL) exit
     enddo ! norder
-    if (norder>MAX_NORDER) then
-      write(6,*) 'Virial ratio    = ',vratio
-      call quit('Failed to converge virial ratio to target accuracy.')
-    endif
+    if (norder>MAX_NORDER) write(6,*) &
+       &'WARNING: failed to converge virial ratio to target accuracy.'
+    norder = min(norder,MAX_NORDER)
 
     ! Solve again to make plot, and report.
+    allocate (orbcoeff(0:norder))
     call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio, &
        &nplot=10)
     write(6,*) 'Expansion order = '//trim(i2s(norder))
@@ -107,43 +111,59 @@ CONTAINS
     ! Brute-force integration of target function.
     ! Locate integration range.
     allocate(hbasis(0:norder))
-    x = -0.5d0
-    do
-      call eval_hermite_poly_norm (norder, x, hbasis)
-      t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
-      if (exp(-x*x)<PSI2_TOL*t1*t1) exit
-      x = 1.5d0*x
-    enddo
-    xl = x
-    x = 0.5d0
-    do
-      call eval_hermite_poly_norm (norder, x, hbasis)
-      t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
-      if (exp(-x*x)<PSI2_TOL*t1*t1) exit
-      x = 1.5d0*x
-    enddo
-    xr = x
+    xl = locate_quantile(norder,orbcoeff,CDF_TOL)
+    xr = locate_quantile(norder,orbcoeff,1.d0-CDF_TOL)
     dx = (xr-xl)/dble(NPOINT_BRUTE_FORCE)
-    fexpval = 0.d0
+    fint = 0.d0
     do i = 0, NPOINT_BRUTE_FORCE
       x = xl + (dble(i)/dble(NPOINT_BRUTE_FORCE))*(xr-xl)
       call eval_hermite_poly_norm (norder, x, hbasis)
       t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
-      psix2 = exp(-x*x)*t1*t1
-      !fx = cos(x/sqrt(omega))
-      !fx = 1.d0 / (1.d0 + x**2/omega)
-      fx = exp(-(x/sqrt(omega)-0.5d0)**2)
-      fexpval = fexpval + fx*psix2*dx
+      call eval_test_functions (x*inv_sqrt_omega, fu)
+      fint = fint + fu*exp(-x*x)*t1*t1*dx
     enddo ! i
-    write(6,*) '<f>             = ', fexpval
+    do i = 1, NFUNCTION
+      write(6,*) '<f_'//trim(i2s(i))//'>           = ', fint(i)
+    enddo ! i
     write(6,*) 'Int. range      = [', xl, ':', xr,']'
     write(6,*)
-    write(13,*) 0, fexpval
-    write(13,*) MAX_NGRID, fexpval
-    write(13,'(a)') '&'
     deallocate(hbasis)
 
+    ! Plot potential, wave function and test functions against u.
+    allocate (hbasis(0:norder))
+    ! Plot V(u).
+    do i = 0, PLOT_NPOINT
+      x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
+      call eval_hermite_poly_norm (norder_v, x, hbasis)
+      write(14,*) x*inv_sqrt_omega+ucentre, &
+         &sum(vcoeff(0:norder_v)*hbasis(0:norder_v))*omega
+    enddo ! i
+    write(14,'(a)') '&'
+    ! Plot target functions.
+    do j = 1, NFUNCTION
+      do i = 0, PLOT_NPOINT
+        x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
+        call eval_test_functions (x*inv_sqrt_omega, fu)
+        write(14,*) x*inv_sqrt_omega, fu(j)
+      enddo ! i
+      write(14,'(a)') '&'
+    enddo ! j
+    ! Plot Psi_0(u).
+    !write(14,*) xl*inv_sqrt_omega+ucentre, e0*omega
+    !write(14,*) xr*inv_sqrt_omega+ucentre, e0*omega
+    !write(14,'(a)') '&'
+    do i = 0, PLOT_NPOINT
+      x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
+      call eval_hermite_poly_norm (norder, x, hbasis)
+      write(14,*) x*inv_sqrt_omega, e0*omega+omega**(0.25d0) * &
+         &exp(-0.5d0*x*x)*sum(orbcoeff(0:norder)*hbasis(0:norder))
+    enddo ! i
+    write(14,'(a)') '&'
+    deallocate (hbasis)
+
     ! Loop over quadrature grid sizes.
+    grid_failed = .false.
+    fexpval = 0.d0
     do ngrid = 2, MAX_NGRID
       allocate(xpower_expval(0:2*ngrid-1), grid_x(ngrid), grid_P(ngrid))
       ! Evaluate expectation values of <x^i>.
@@ -159,12 +179,13 @@ CONTAINS
       if (ierr/=0) then
         ! Report failure.
         write(6,*) '  Grid did not converge.'
+        grid_failed(ngrid) = .true.
       else
         ! Report success.
         write(12,*)grid_x(1)-1.d0, dble(ngrid-2)
         do igrid = 1, ngrid
-          write(6,*)'  Grid point #'//trim(i2s(igrid))//': x, P = ', &
-             &grid_x(igrid), grid_P(igrid)
+          write(6,*)'  u_'//trim(i2s(igrid))//', P_'//trim(i2s(igrid))//&
+             &' = ', grid_x(igrid)*inv_sqrt_omega, grid_P(igrid)
           write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2)
           write(12,*) grid_x(igrid)-0.1d0, dble(ngrid-2) + grid_P(igrid)
           write(12,*) grid_x(igrid)+0.1d0, dble(ngrid-2) + grid_P(igrid)
@@ -173,21 +194,32 @@ CONTAINS
         write(12,*)grid_x(ngrid)+1.d0, dble(ngrid-2)
         write(12,'(a)')'&'
         ! Evaluate expectation value of potential energy using this grid.
-        fexpval = 0.d0
         do igrid = 1, ngrid
           x = grid_x(igrid)
-          !fx = cos(x/sqrt(omega))
-          !fx = 1.d0 / (1.d0 + x**2/omega)
-          fx = exp(-(x/sqrt(omega)-0.5d0)**2)
-          fexpval = fexpval + grid_P(igrid)*fx
+          call eval_test_functions (x*inv_sqrt_omega, fu)
+          fexpval(:,ngrid) = fexpval(:,ngrid) + grid_P(igrid)*fu(:)
         enddo ! igrid
-        write(6,*)'  <f> = ', fexpval
-        write(13,*) ngrid, fexpval
+        write(6,*)'  Integration tests:'
+        do i = 1, NFUNCTION
+          write(6,*)'    <f_'//trim(i2s(i))//'> = ', fexpval(i,ngrid)
+        enddo ! i
       endif
       write(6,*)
       ! Clean up.
       deallocate(xpower_expval, grid_x, grid_P)
     enddo ! ngrid
+
+    ! Plot relative grid integration results.
+    write(13,*) 0, 1.d0
+    write(13,*) MAX_NGRID, 1.d0
+    write(13,'(a)') '&'
+    do i = 1, NFUNCTION
+      do ngrid = 2, MAX_NGRID
+        if (grid_failed(ngrid)) cycle
+        write(13,*) ngrid, fexpval(i,ngrid)/fint(i)
+      enddo ! ngrid
+      write(13,'(a)') '&'
+    enddo ! i
 
   END SUBROUTINE main
 
@@ -615,6 +647,96 @@ CONTAINS
   END FUNCTION eval_xpower_expval
 
 
+  DOUBLE PRECISION FUNCTION locate_quantile (norder, orbcoeff, p)
+    !----------------------------------------------------------!
+    ! Locate value of x at which the cumulative distribution   !
+    ! function associated with the wave function of normalized !
+    ! Hermite coefficients ORBCOEFF(0:NORDER) is P.            !
+    !----------------------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: norder
+    DOUBLE PRECISION, INTENT(in) :: orbcoeff(0:norder), p
+    DOUBLE PRECISION, PARAMETER :: REL_TOL = 1.d-3
+    DOUBLE PRECISION x, f, x1, f1, x2, f2
+
+    if (p<=0.d0 .or. p>=1.d0) call quit('Asked for impossible quantile.')
+    locate_quantile = 0.d0
+
+    ! Get initial pair of points.
+    x1 = 0.d0
+    f1 = eval_cdf (norder, orbcoeff, x1)
+    if (f1>p) then
+      x2 = -1.d0
+    elseif (f1<p) then
+      x2 = 1.d0
+    else
+      return
+    endif
+    f2 = eval_cdf (norder, orbcoeff, x2)
+
+    ! Loop until convergence.
+    x = (x1+x2)/0.5d0
+    do
+      if (abs(f2-f1)<1.d-12) then
+        if (p<min(f1,f2)) then
+          x = min(x1,x2)-0.1d0*(1.d0+abs(min(x1,x2)))
+        elseif (p>min(f1,f2)) then
+          x = max(x1,x2)+0.1d0*(1.d0+abs(min(x1,x2)))
+        else
+          exit
+        endif
+      else
+        x = x1 + 0.5d0*(p-f1)*((x2-x1)/(f2-f1))
+      endif
+      f = eval_cdf (norder, orbcoeff, x)
+      if (abs(f-p)<REL_TOL*min(p,1.d0-p)) exit
+      f1 = f2
+      x1 = x2
+      f2 = f
+      x2 = x
+    enddo
+    locate_quantile = x
+
+  END FUNCTION locate_quantile
+
+
+  DOUBLE PRECISION FUNCTION eval_cdf (norder, orbcoeff, x)
+    !-----------------------------------------------------------!
+    ! Evaluate the cumulative distribution function associated  !
+    ! with the wave function of normalized Hermite coefficients !
+    ! ORBCOEFF(0:NORDER) at X.                                  !
+    !-----------------------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: norder
+    DOUBLE PRECISION, INTENT(in) :: orbcoeff(0:norder), x
+    DOUBLE PRECISION exp_x2, hbasis(0:2*norder), log_fact(0:2*norder), &
+       &coeff(0:2*norder), t1
+    INTEGER i, j, k
+
+    ! Compute required quantities.
+    exp_x2 = exp(-x*x)
+    call eval_hermite_poly_norm (2*norder, x, hbasis)
+    log_fact(0:2*norder) = eval_log_fact( (/ (i, i=0,2*norder) /) )
+    coeff(0) = 0.d0
+    coeff(1:2*norder) = (/ ( -exp_x2 * hbasis(k-1) / sqrt(dble(2*k)), &
+         &                   k=1,2*norder ) /)
+
+    ! Main contribution.
+    eval_cdf = 0.5d0*(1.d0+erf(x))
+
+    ! Loop over corrections.
+    do i = 0, norder
+      t1 = eval_comb_Gamma (2*i, i, i, coeff(0:2*i), log_fact(0:2*i))
+      eval_cdf = eval_cdf + orbcoeff(i)*orbcoeff(i)*t1
+      do j = i+1, norder
+        t1 = eval_comb_Gamma (i+j, i, j, coeff(0:i+j), log_fact(0:i+j))
+        eval_cdf = eval_cdf + 2.d0*orbcoeff(i)*orbcoeff(j)*t1
+      enddo ! j
+    enddo ! i
+
+  END FUNCTION eval_cdf
+
+
   SUBROUTINE solve_grid_newton (ngrid, xpower_expval, norder, orbcoeff, &
      &grid_x, grid_P, ierr)
     !------------------------------------------------------------!
@@ -628,177 +750,185 @@ CONTAINS
     DOUBLE PRECISION, INTENT(inout) :: grid_x(ngrid), grid_P(ngrid)
     INTEGER, INTENT(inout) :: ierr
     ! Maximum number of Nweton's method iterations to attempt.
-    INTEGER, PARAMETER :: MAX_ITER = 50
+    INTEGER, PARAMETER :: MAX_ITER = 500
     LOGICAL, PARAMETER :: VERBOSE = .false.
+    DOUBLE PRECISION, PARAMETER :: F_TOL = 1.d-12
     ! Misc local variables.
-    DOUBLE PRECISION fvec(2*ngrid), Jmat(2*ngrid,2*ngrid), t1, &
-       &grid_P_test(ngrid), grid_x_test(ngrid), xscale, x0max, x, &
+    DOUBLE PRECISION fvec(2*ngrid), Jmat(2*ngrid,2*ngrid), &
+       &grid_P_test(ngrid), grid_x_test(ngrid), x0max, x, &
        &hbasis(0:norder), dorbcoeff(0:norder-1), grid_orb(ngrid), &
-       &xpower_renorm(0:2*ngrid-1), xu, xv, xw, fu, fv, fw, f, f0, &
-       &fvec_test(2*ngrid)
+       &xu, xv, xw, fu, fv, fw, f, f0, fvec_test(2*ngrid), x0max_init
     INTEGER i, iter, piv(2*ngrid)
     LOGICAL rejected
 
     ierr = 0
-
-    ! Define x rescaling factor.
-    xscale = xpower_expval(2*ngrid-2)**(1.d0/dble(2*ngrid-2))
-    xpower_renorm = (/ ( xpower_expval(i)/xscale**dble(i), i=0,2*ngrid-1 ) /)
-    x0max = 1.d0 + 0.423d0*log(dble(ngrid-1))
-    if (VERBOSE) then
-      write(6,*) '  Using xscale = ', xscale
-      write(6,*) '  Using x0max  = ', x0max
-    endif
 
     ! Define wave function derivative.
     do i = 0, norder-1
       dorbcoeff(i) = orbcoeff(i+1) * sqrt(dble(2*i+2))
     enddo ! i
 
-    ! Initialize to something sensible.
-    grid_x(1:ngrid) = (/ ( xpower_renorm(1) - x0max + &
-       &                   2*x0max*dble(i-1)/dble(ngrid-1), i=1,ngrid) /)
-    grid_P = 1.d0
+    ! The following is a good approximation to the largest point in a
+    ! harmonic grid:
+    x0max_init = 2.d0 * (dble(ngrid)**0.435d0 - 1.d0)
 
-    ! Loop over Newton's method iterations.
-    do iter = 1, MAX_ITER
+    ! Loop over choices of x0max, starting at twice the above value.
+    x0max = 2.d0*x0max_init
+    do
 
-      ! Obtain Newton's method step.
-      call eval_fvec_Jmat (ngrid, grid_x, grid_P, xscale, xpower_renorm, &
-         &norder, orbcoeff, dorbcoeff, fvec, Jmat)
-      f0 = sum(fvec*fvec)
-      call dgetrf (2*ngrid, 2*ngrid, Jmat, 2*ngrid, piv, ierr)
-      if (ierr/=0) return
-      call dgetrs ('N', 2*ngrid, 1, Jmat, 2*ngrid, piv, fvec, 2*ngrid, ierr)
-      if (ierr/=0) return
-
-      ! Test Newton's step.
-      xu = 0.d0
-      fu = f0
-      xw = 1.d0
-      do
-        grid_P_test = grid_P - xw*fvec(ngrid+1:2*ngrid)
-        grid_x_test = grid_x - xw*fvec(1:ngrid)
-        if ( all(grid_P_test>0.d0) .and. &
-           & all(grid_x_test(1:ngrid-1)<grid_x_test(2:ngrid)) ) then
-          call eval_fvec (ngrid, grid_x_test, grid_P_test, xscale, &
-             &xpower_renorm, norder, orbcoeff, fvec_test)
-          fw = sum(fvec_test*fvec_test)
-          exit
-        endif
-        xw = 0.8d0*xw
-      enddo
-
-      if (fw>fu) then
-        ! Find middle point.
-        xv = 0.5d0*xw
-        do
-          grid_P_test = grid_P - xv*fvec(ngrid+1:2*ngrid)
-          grid_x_test = grid_x - xv*fvec(1:ngrid)
-          call eval_fvec (ngrid, grid_x_test, grid_P_test, xscale, &
-             &xpower_renorm, norder, orbcoeff, fvec_test)
-          fw = sum(fvec_test*fvec_test)
-          if (fv<=fu) exit
-          xw = xv
-          fw = fv
-          xv = 0.5d0*xw
-        enddo
-      elseif (fw<fu) then
-        ! Find right-side point.
-        xv = xw
-        fv = fw
-        xw = 2.d0*xv
-        do
-          grid_P_test = grid_P - xw*fvec(ngrid+1:2*ngrid)
-          grid_x_test = grid_x - xw*fvec(1:ngrid)
-          if ( any(grid_P_test<=0.d0) .or. &
-             & any(grid_x_test(1:ngrid-1)>=grid_x_test(2:ngrid)) ) then
-            xw = xv + 0.9d0*(xw-xv)
-            cycle
-          endif
-          call eval_fvec (ngrid, grid_x_test, grid_P_test, xscale, &
-             &xpower_renorm, norder, orbcoeff, fvec_test)
-          fw = sum(fvec_test*fvec_test)
-          if (fv<=fw) exit
-          xv = xw
-          fv = fw
-          xw = xv + 2.d0*(xw-xv)
-        enddo
-      else
-        xv = 0.d0
-        fv = fu
+      ! Initialize to something sensible.
+      if (VERBOSE) write(6,*) '  Using x0max  = ', x0max
+      grid_x(1:ngrid) = (/ ( xpower_expval(1) - x0max + &
+         &                   2*x0max*dble(i-1)/dble(ngrid-1), i=1,ngrid) /)
+      grid_P = 1.d0
+      if (VERBOSE) then
+        write(6,*) '  Initial unscaled parameters:'
+        do i = 1, ngrid
+          write(6,*) '    x,P #'//trim(i2s(i))//': ', grid_x(i), grid_P(i)
+        enddo ! i
       endif
 
-      ! Zone in on minimum.
-      do
-        call parabolic_min (xu, xv, xw, fu, fv, fw, x, f, rejected)
-        if (rejected) exit
-        if (x<=xu.or.x>=xw) exit
-        grid_P_test = grid_P - x*fvec(ngrid+1:2*ngrid)
-        grid_x_test = grid_x - x*fvec(1:ngrid)
-        call eval_fvec (ngrid, grid_x_test, grid_P_test, xscale, &
-           &xpower_renorm, norder, orbcoeff, fvec_test)
-        f = sum(fvec_test*fvec_test)
-        if (f<fv) then
-          if (x<xv) then
+      ! Loop over Newton's method iterations.
+      do iter = 1, MAX_ITER
+
+        ! Obtain Newton's method step.
+        call eval_fvec_Jmat (ngrid, grid_x, grid_P, xpower_expval, &
+           &norder, orbcoeff, dorbcoeff, fvec, Jmat)
+        f0 = sum(fvec*fvec)
+        call dgetrf (2*ngrid, 2*ngrid, Jmat, 2*ngrid, piv, ierr)
+        if (ierr/=0) exit
+        call dgetrs ('N', 2*ngrid, 1, Jmat, 2*ngrid, piv, fvec, 2*ngrid, ierr)
+        if (ierr/=0) exit
+
+        ! Test Newton's step.
+        xu = 0.d0
+        fu = f0
+        xw = 1.d0
+        do
+          grid_x_test = grid_x - xw*fvec(1:ngrid)
+          grid_P_test = grid_P - xw*fvec(ngrid+1:2*ngrid)
+          if ( all(grid_P_test>0.d0) .and. &
+             & all(grid_x_test(1:ngrid-1)<grid_x_test(2:ngrid)) ) then
+            call eval_fvec (ngrid, grid_x_test, grid_P_test, xpower_expval, &
+               &norder, orbcoeff, fvec_test)
+            fw = sum(fvec_test*fvec_test)
+            exit
+          endif
+          xw = 0.8d0*xw
+        enddo
+
+        if (fw>fu) then
+          ! Find middle point.
+          xv = 0.5d0*xw
+          do
+            grid_x_test = grid_x - xv*fvec(1:ngrid)
+            grid_P_test = grid_P - xv*fvec(ngrid+1:2*ngrid)
+            call eval_fvec (ngrid, grid_x_test, grid_P_test, xpower_expval, &
+               &norder, orbcoeff, fvec_test)
+            fv = sum(fvec_test*fvec_test)
+            if (fv<=fu) exit
             xw = xv
             fw = fv
-          elseif (x>xv) then
-            xu = xv
-            fu = fv
-          else
-            exit
-          endif
-          xv = x
-          fv = f
-        elseif (f>fv) then
-          if (x<xv) then
-            xu = x
-            fu = f
-          elseif (x>xv) then
-            xw = x
-            fw = f
-          else
-            exit
-          endif
+            xv = 0.5d0*xw
+          enddo
+        elseif (fw<fu) then
+          ! Find right-side point.
+          xv = xw
+          fv = fw
+          xw = 2.d0*xv
+          do
+            grid_x_test = grid_x - xw*fvec(1:ngrid)
+            grid_P_test = grid_P - xw*fvec(ngrid+1:2*ngrid)
+            if ( any(grid_P_test<=0.d0) .or. &
+               & any(grid_x_test(1:ngrid-1)>=grid_x_test(2:ngrid)) ) then
+              xw = xv + 0.9d0*(xw-xv)
+              cycle
+            endif
+            call eval_fvec (ngrid, grid_x_test, grid_P_test, xpower_expval, &
+               &norder, orbcoeff, fvec_test)
+            fw = sum(fvec_test*fvec_test)
+            if (fv<=fw) exit
+            xv = xw
+            fv = fw
+            xw = xv + 2.d0*(xw-xv)
+          enddo
         else
-          exit
+          xv = 0.d0
+          fv = fu
         endif
-        if (xw-xu<1.d-3) exit
+
+        ! Zone in on minimum.
+        do
+          call parabolic_min (xu, xv, xw, fu, fv, fw, x, f, rejected)
+          if (rejected) exit
+          if (x<=xu.or.x>=xw) exit
+          grid_x_test = grid_x - x*fvec(1:ngrid)
+          grid_P_test = grid_P - x*fvec(ngrid+1:2*ngrid)
+          call eval_fvec (ngrid, grid_x_test, grid_P_test, xpower_expval, &
+             &norder, orbcoeff, fvec_test)
+          f = sum(fvec_test*fvec_test)
+          if (f<fv) then
+            if (x<xv) then
+              xw = xv
+              fw = fv
+            elseif (x>xv) then
+              xu = xv
+              fu = fv
+            else
+              exit
+            endif
+            xv = x
+            fv = f
+          elseif (f>fv) then
+            if (x<xv) then
+              xu = x
+              fu = f
+            elseif (x>xv) then
+              xw = x
+              fw = f
+            else
+              exit
+            endif
+          else
+            exit
+          endif
+          if (xw-xu<1.d-3) exit
+        enddo
+
+        ! Apply step.
+        grid_x = grid_x - xv*fvec(1:ngrid)
+        grid_P = grid_P - xv*fvec(ngrid+1:2*ngrid)
+
+        if (VERBOSE) then
+          ! Report iteration summary.
+          write(6,*) '  Iteration '//trim(i2s(iter))//':'
+          write(6,*) '    f at start = ', f0
+          write(6,*) '    f at end   = ', fv
+          write(6,*) '    delta f    = ', f0-fv
+          write(6,*) '    Step scale = ', xv
+          write(6,*) '    Disp norm  = ', sqrt(sum((xv*fvec)**2)/dble(2*ngrid))
+          write(6,*) '    Unscaled parameters:'
+          do i = 1, ngrid
+            write(6,*) '      x,P #'//trim(i2s(i))//': ', grid_x(i), grid_P(i)
+          enddo ! i
+        endif ! VERBOSE
+
+        ! Check for convergence.
+        if (abs(fv)<F_TOL) exit
+
       enddo
+      if (iter>MAX_ITER) ierr = 3
 
-      ! Apply step.
-      fvec = xv*fvec
-      grid_x = grid_x - fvec(1:ngrid)
-      grid_P = grid_P - fvec(ngrid+1:2*ngrid)
+      if (ierr==0) exit
 
-      ! Check function and parameter convergence.
-      t1 = sqrt(sum(fvec**2)/dble(2*ngrid))
-      if (VERBOSE) then
-        write(6,*) '  Iteration '//trim(i2s(iter))//':'
-        write(6,*) '    delta f    = ', f0-fv
-        write(6,*) '    Step scale = ', xv
-        write(6,*) '    Disp norm  = ', t1
-        write(6,*) '    Unscaled parameters:'
-        do i = 1, ngrid
-          write(6,*) '      x,P #'//trim(i2s(i))//': ', grid_x(i), grid_P(i)
-        enddo ! i
-      endif ! VERBOSE
-      if (abs(f0)<1.d-12) exit
-      if (abs(f0-fv)<1.d-8*abs(f0)) then
-        ierr = 1
-        exit
-      endif
-      if (t1<1.d-10) then
-        ierr = 2
-        exit
-      endif
+      ! Decrease x0max slowly, since the basins of attraction of this problem
+      ! appear to be rather narrow.
+      x0max = x0max*0.99d0
+      if (x0max<0.1d0*x0max_init) exit
 
     enddo
-    if (iter>MAX_ITER) ierr = 3
 
     ! Rescale grid parameters.
-    grid_x = grid_x*xscale
     do i = 1, ngrid
       x = grid_x(i)
       call eval_hermite_poly_norm (norder, x, hbasis)
@@ -810,22 +940,22 @@ CONTAINS
   END SUBROUTINE solve_grid_newton
 
 
-  SUBROUTINE eval_fvec (ngrid, grid_x, grid_P, xscale, xpower_renorm, norder, &
+  SUBROUTINE eval_fvec (ngrid, grid_x, grid_P, xpower_expval, norder, &
      &orbcoeff, fvec)
     !-----------------------------------------------!
     ! Evaluate target function for Newton's method. !
     !-----------------------------------------------!
     IMPLICIT NONE
     INTEGER, INTENT(in) :: ngrid, norder
-    DOUBLE PRECISION, INTENT(in) :: grid_x(ngrid), grid_P(ngrid), xscale, &
-       &xpower_renorm(0:2*ngrid-1), orbcoeff(0:norder)
+    DOUBLE PRECISION, INTENT(in) :: grid_x(ngrid), grid_P(ngrid), &
+       &xpower_expval(0:2*ngrid-1), orbcoeff(0:norder)
     DOUBLE PRECISION, INTENT(inout) :: fvec(2*ngrid)
     DOUBLE PRECISION grid_orb(ngrid), x, hbasis(0:norder)
     INTEGER i
 
     ! Evaluate required objects.
     do i = 1, ngrid
-      x = grid_x(i)*xscale
+      x = grid_x(i)
       call eval_hermite_poly_norm (norder, x, hbasis)
       grid_orb(i) = exp(-0.5d0*x*x) * sum(orbcoeff(0:norder)*hbasis(0:norder))
     enddo ! i
@@ -834,27 +964,27 @@ CONTAINS
     fvec(1) = sum( grid_P(1:ngrid)*grid_orb(1:ngrid)**2 ) - 1.d0
     fvec(2:2*ngrid) = (/ ( sum( grid_P(1:ngrid)*grid_orb(1:ngrid)**2*&
        &                        ( grid_x(1:ngrid)**dble(i-1) - &
-       &                          xpower_renorm(i-1) ) ), i=2,2*ngrid ) /)
+       &                          xpower_expval(i-1) ) ), i=2,2*ngrid ) /)
 
   END SUBROUTINE eval_fvec
 
 
-  SUBROUTINE eval_fvec_Jmat (ngrid, grid_x, grid_P, xscale, xpower_renorm, &
+  SUBROUTINE eval_fvec_Jmat (ngrid, grid_x, grid_P, xpower_expval, &
      &norder, orbcoeff, dorbcoeff, fvec, Jmat)
     !------------------------------------------------------------!
     ! Evaluate target function and Jacobian for Newton's method. !
     !------------------------------------------------------------!
     IMPLICIT NONE
     INTEGER, INTENT(in) :: ngrid, norder
-    DOUBLE PRECISION, INTENT(in) :: grid_x(ngrid), grid_P(ngrid), xscale, &
-       &xpower_renorm(0:2*ngrid-1), orbcoeff(0:norder), dorbcoeff(0:norder-1)
+    DOUBLE PRECISION, INTENT(in) :: grid_x(ngrid), grid_P(ngrid), &
+       &xpower_expval(0:2*ngrid-1), orbcoeff(0:norder), dorbcoeff(0:norder-1)
     DOUBLE PRECISION, INTENT(inout) :: fvec(2*ngrid), Jmat(2*ngrid,2*ngrid)
     DOUBLE PRECISION grid_orb(ngrid), grid_dorb(ngrid), x, hbasis(0:norder)
     INTEGER i
 
     ! Evaluate required objects.
     do i = 1, ngrid
-      x = grid_x(i)*xscale
+      x = grid_x(i)
       call eval_hermite_poly_norm (norder, x, hbasis)
       grid_orb(i) = exp(-0.5d0*x*x) * sum(orbcoeff(0:norder)*hbasis(0:norder))
       grid_dorb(i) = exp(-0.5d0*x*x) * &
@@ -865,23 +995,39 @@ CONTAINS
     fvec(1) = sum( grid_P(1:ngrid)*grid_orb(1:ngrid)**2 ) - 1.d0
     fvec(2:2*ngrid) = (/ ( sum( grid_P(1:ngrid)*grid_orb(1:ngrid)**2*&
        &                        ( grid_x(1:ngrid)**dble(i-1) - &
-       &                          xpower_renorm(i-1) ) ), i=2,2*ngrid ) /)
+       &                          xpower_expval(i-1) ) ), i=2,2*ngrid ) /)
 
     ! Evaluate Jacobian.
     Jmat = 0.d0
     Jmat(1,1:ngrid) = grid_P(1:ngrid)*2.d0*grid_orb(1:ngrid)*&
-       &grid_dorb(1:ngrid)*xscale
+       &grid_dorb(1:ngrid)
     Jmat(1,ngrid+1:2*ngrid) = grid_orb(1:ngrid)**2
     do i = 2, 2*ngrid
       Jmat(i,1:ngrid) = grid_P(1:ngrid) * &
          &( dble(i-1)*grid_orb(1:ngrid)**2*grid_x(1:ngrid)**dble(i-2) + &
-         &  2.d0*grid_orb(1:ngrid)*grid_dorb(1:ngrid)*xscale* &
-         &  ( grid_x(1:ngrid)**dble(i-1) - xpower_renorm(i-1) ) )
+         &  2.d0*grid_orb(1:ngrid)*grid_dorb(1:ngrid)* &
+         &  ( grid_x(1:ngrid)**dble(i-1) - xpower_expval(i-1) ) )
       Jmat(i,ngrid+1:2*ngrid) = grid_orb(1:ngrid)**2 * &
-         &( grid_x(1:ngrid)**dble(i-1) - xpower_renorm(i-1) )
+         &( grid_x(1:ngrid)**dble(i-1) - xpower_expval(i-1) )
     enddo ! i
 
   END SUBROUTINE eval_fvec_Jmat
+
+
+  SUBROUTINE eval_test_functions (u, f)
+    !---------------------------------------------------------!
+    ! Evaluate integration test functions at u.  These should !
+    ! be NFUNCTION functions whose Taylor expansions converge !
+    ! slowly, and should be positive everywhere so we can     !
+    ! evaluate a relative error.                              !
+    !---------------------------------------------------------!
+    IMPLICIT NONE
+    DOUBLE PRECISION, INTENT(in) :: u
+    DOUBLE PRECISION, INTENT(inout) :: f(3)
+    f(1) = exp(-(u+0.5)**2)
+    f(2) = 1.d0 / (1.d0 + 2.d0*(u-0.5d0)**2)
+    f(3) = 0.5d0+0.5d0*cos(4.d0*u)
+  END SUBROUTINE eval_test_functions
 
 
   ! Hermite polynomial tools.  NB, we use "normalized" Hermite polynomials,
