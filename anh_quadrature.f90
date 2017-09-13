@@ -72,7 +72,7 @@ CONTAINS
       &power.')
     allocate(vcoeff_nat(0:norder_v))
     read(line,*) vcoeff_nat(0:norder_v)
-    if (vcoeff_nat(norder_v)<epsilon(1.d0)) &
+    if (vcoeff_nat(norder_v)<=0.d0) &
        &call quit ('Leading term of V(u) must have a positive coefficient.')
 
     ! Internally, we work in a dimensionless scale where x = sqrt(omega)*u
@@ -103,7 +103,7 @@ CONTAINS
     ! Solve again to make plot, and report.
     allocate (orbcoeff(0:norder))
     call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio, &
-       &nplot=10)
+       &nplot=MAX_NORDER)
     write(6,*) 'Expansion order = '//trim(i2s(norder))
     write(6,*) 'E0 (a.u.)       = ', e0*omega
     write(6,*) 'Virial ratio    = ', vratio
