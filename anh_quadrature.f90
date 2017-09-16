@@ -34,12 +34,18 @@ CONTAINS
     ! associated virial ratio is within VIRIAL_TOL of unity.
     INTEGER, PARAMETER :: MAX_NORDER = 200 ! FIXME - dsyev* hang at norder=202
     DOUBLE PRECISION, PARAMETER :: VIRIAL_TOL = 1.d-9
+    ! Variables for plotting solution to 1D Schroedinger equation.
+    INTEGER iplot
+    DOUBLE PRECISION max_vx, psix, vx, plot_orb_scale_factor
+    DOUBLE PRECISION, ALLOCATABLE :: all_eigval(:), all_eigvec(:,:)
+    DOUBLE PRECISION, PARAMETER :: PLOT_MAX_X = 5.d0 ! on either side of zero
+    INTEGER, PARAMETER :: PLOT_NPOINT = 200 ! on either side of zero
     ! Variables for quadrature grid.
     INTEGER ngrid
     DOUBLE PRECISION, ALLOCATABLE :: xpower_expval(:)
     DOUBLE PRECISION, ALLOCATABLE :: grid_x(:), grid_p(:)
     ! Evaluation of expectation value of v(x).
-    INTEGER, PARAMETER :: PLOT_NPOINT = 200
+    !INTEGER, PARAMETER :: PLOT_NPOINT = 200
     INTEGER, PARAMETER :: NFUNCTION = 6
     INTEGER, PARAMETER :: MAX_NGRID = 10
     INTEGER, PARAMETER :: NPOINT_BRUTE_FORCE = 10000
@@ -52,6 +58,7 @@ CONTAINS
     CHARACTER(2048) line
     INTEGER i, j, iexp, igrid, ierr
     DOUBLE PRECISION t1
+    INTEGER, PARAMETER :: io=10
 
     ! Get V coefficients and norder.
     write(6,*) 'Enter coefficients c_k of expansion of V(u) in natural powers,'
@@ -68,6 +75,7 @@ CONTAINS
       norder_v = norder_v+1
     enddo
     if (norder_v<0) call quit ('Could not parse coefficients.')
+    if (norder_v<1) call quit ('Cannot use contant potential.')
     if (mod(norder_v,2)/=0) call quit ('Leading term of V(u) must be an even &
       &power.')
     allocate(vcoeff_nat(0:norder_v))
@@ -79,8 +87,18 @@ CONTAINS
     ! and energies are e = E/omega, where omega is optimized so as to yield
     ! the best solution at a fixed expansion order.  Also, we shift the
     ! potential self-consistently so that <x> = 0 at this expansion order.
-    ucentre = 0.d0
-    call obtain_ucentre_omega (norder_v, vcoeff_nat, 40, ucentre, omega)
+    write(6,*) 'Enter ucentre and omega (a.u.) [single line; empty to &
+       &autodetect]:'
+    read(5,'(a)',iostat=ierr) line
+    if (ierr/=0) call quit()
+    if (len_trim(line)==0) then
+      ucentre = 0.d0
+      call obtain_ucentre_omega (norder_v, vcoeff_nat, 40, ucentre, omega)
+    else
+      read(line,*,iostat=ierr) ucentre, omega
+      if (ierr/=0) call quit()
+      if (omega<=0.d0) call quit('Frequency must be positive.')
+    endif
     inv_sqrt_omega = 1.d0/sqrt(omega)
     write(6,*) 'Centre          = ', ucentre
     write(6,*) 'Omega (a.u.)    = ', omega
@@ -90,20 +108,56 @@ CONTAINS
     call transform_potential (norder_v, vcoeff_nat, ucentre, omega, vcoeff)
 
     ! Converge trial ground-state wave function with expansion order.
-    do norder = max(norder_v,2), MAX_NORDER
-      allocate (orbcoeff(0:norder))
-      call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
-      deallocate (orbcoeff)
+    do norder = max(norder_v,2), max(norder_v,2,MAX_NORDER)
+      if (allocated(orbcoeff)) deallocate(orbcoeff, all_eigval, all_eigvec)
+      allocate (orbcoeff(0:norder), all_eigval(0:norder), &
+         &all_eigvec(0:norder,0:norder))
+      call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio, &
+         &all_eigval, all_eigvec)
       if (abs(vratio-1.d0)<VIRIAL_TOL) exit
     enddo ! norder
     if (norder>MAX_NORDER) write(6,*) &
        &'WARNING: failed to converge virial ratio to target accuracy.'
     norder = min(norder,MAX_NORDER)
 
-    ! Solve again to make plot, and report.
-    allocate (orbcoeff(0:norder))
-    call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio, &
-       &nplot=MAX_NORDER)
+    ! Plot solution.
+    open(unit=io,file='1D_schroedinger.agr',status='replace',iostat=ierr)
+    if (ierr/=0) call quit()
+    allocate (hbasis(0:norder))
+    ! Plot V(x).
+    max_vx = 0.d0
+    do i = -PLOT_NPOINT, PLOT_NPOINT
+      x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
+      u = x*inv_sqrt_omega - ucentre
+      call eval_hermite_poly_norm (norder_v, x, hbasis)
+      vx = sum(vcoeff(0:norder_v)*hbasis(0:norder_v))
+      if (i==-PLOT_NPOINT .or. vx>max_vx) max_vx = vx
+      write(io,*) u, vx*omega
+    enddo ! i
+    ! Plot Psi_n(x).
+    plot_orb_scale_factor = 0.5d0*minval(all_eigval(1:min(norder,MAX_NORDER))- &
+       &                                 all_eigval(0:min(norder,MAX_NORDER-1)))
+    do iplot = 0, min(norder,MAX_NORDER)
+      if (all_eigval(iplot)>max_vx) cycle
+      write(io,'(a)') '&'
+      write(io,*) -PLOT_MAX_X*inv_sqrt_omega - ucentre, all_eigval(iplot)*omega
+      write(io,*) PLOT_MAX_X*inv_sqrt_omega - ucentre, all_eigval(iplot)*omega
+      write(io,'(a)') '&'
+      do i = -PLOT_NPOINT, PLOT_NPOINT
+        x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
+        u = x*inv_sqrt_omega - ucentre
+        call eval_hermite_poly_norm (norder, x, hbasis)
+        t1 = exp(-0.5d0*x*x)
+        psix = t1*sum(all_eigvec(0:norder,iplot)*hbasis(0:norder))
+        write(io,*) u, all_eigval(iplot)*omega + plot_orb_scale_factor*psix
+      enddo ! i
+    enddo ! iplot
+    deallocate (hbasis)
+    close(io)
+
+    deallocate (all_eigval, all_eigvec)
+
+    ! Report.
     write(6,*) 'Expansion order = '//trim(i2s(norder))
     write(6,*) 'E0 (a.u.)       = ', e0*omega
     write(6,*) 'Virial ratio    = ', vratio
@@ -131,40 +185,45 @@ CONTAINS
     deallocate(hbasis)
 
     ! Plot potential, wave function and test functions against u.
+    open(unit=io,file='int_test_functions.agr',status='replace',iostat=ierr)
+    if (ierr/=0) call quit()
     allocate (hbasis(0:norder))
     ! Plot V(u).
     do i = 0, PLOT_NPOINT
       x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
       u = x*inv_sqrt_omega - ucentre
       call eval_hermite_poly_norm (norder_v, x, hbasis)
-      write(14,*) u, sum(vcoeff(0:norder_v)*hbasis(0:norder_v))*omega
+      write(io,*) u, sum(vcoeff(0:norder_v)*hbasis(0:norder_v))*omega
     enddo ! i
-    write(14,'(a)') '&'
+    write(io,'(a)') '&'
     ! Plot target functions.
     do j = 1, NFUNCTION
       do i = 0, PLOT_NPOINT
         x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
         u = x*inv_sqrt_omega - ucentre
         call eval_test_functions (u, fu)
-        write(14,*) u, fu(j)
+        write(io,*) u, fu(j)
       enddo ! i
-      write(14,'(a)') '&'
+      write(io,'(a)') '&'
     enddo ! j
     ! Plot Psi_0(u).
-    write(14,*) xl*inv_sqrt_omega - ucentre, e0*omega
-    write(14,*) xr*inv_sqrt_omega - ucentre, e0*omega
-    write(14,'(a)') '&'
+    write(io,*) xl*inv_sqrt_omega - ucentre, e0*omega
+    write(io,*) xr*inv_sqrt_omega - ucentre, e0*omega
+    write(io,'(a)') '&'
     do i = 0, PLOT_NPOINT
       x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
       u = x*inv_sqrt_omega - ucentre
       call eval_hermite_poly_norm (norder, x, hbasis)
-      write(14,*) u, e0*omega + omega**0.25d0*exp(-0.5d0*x*x)*&
+      write(io,*) u, e0*omega + omega**0.25d0*exp(-0.5d0*x*x)*&
          &                      sum(orbcoeff(0:norder)*hbasis(0:norder))
     enddo ! i
-    write(14,'(a)') '&'
+    write(io,'(a)') '&'
     deallocate (hbasis)
+    close(io)
 
     ! Loop over quadrature grid sizes.
+    open(unit=io,file='quadrature_grid.agr',status='replace',iostat=ierr)
+    if (ierr/=0) call quit()
     grid_failed = .false.
     fexpval = 0.d0
     do ngrid = 2, MAX_NGRID
@@ -184,19 +243,19 @@ CONTAINS
         write(6,*) '  Grid did not converge.'
         grid_failed(ngrid) = .true.
       else
-        ! Report success.
+        ! Report and plot grid.
         do igrid = 1, ngrid
           u = grid_x(igrid)*inv_sqrt_omega - ucentre
-          if (igrid==1) write(12,*) u-1.d0, dble(ngrid-2)
+          if (igrid==1) write(io,*) u-1.d0, dble(ngrid-2)
           write(6,*)'  u_'//trim(i2s(igrid))//', P_'//trim(i2s(igrid))//&
              &' = ', u, grid_P(igrid)
-          write(12,*) u - 0.1d0, dble(ngrid-2)
-          write(12,*) u - 0.1d0, dble(ngrid-2) + grid_P(igrid)
-          write(12,*) u + 0.1d0, dble(ngrid-2) + grid_P(igrid)
-          write(12,*) u + 0.1d0, dble(ngrid-2)
-          if (igrid==ngrid) write(12,*) u+1.d0, dble(ngrid-2)
+          write(io,*) u - 0.1d0, dble(ngrid-2)
+          write(io,*) u - 0.1d0, dble(ngrid-2) + grid_P(igrid)
+          write(io,*) u + 0.1d0, dble(ngrid-2) + grid_P(igrid)
+          write(io,*) u + 0.1d0, dble(ngrid-2)
+          if (igrid==ngrid) write(io,*) u+1.d0, dble(ngrid-2)
         enddo ! igrid
-        write(12,'(a)')'&'
+        write(io,'(a)')'&'
         ! Evaluate expectation value of potential energy using this grid.
         do igrid = 1, ngrid
           x = grid_x(igrid)
@@ -213,18 +272,19 @@ CONTAINS
       ! Clean up.
       deallocate(xpower_expval, grid_x, grid_P)
     enddo ! ngrid
+    close(io)
 
     ! Plot relative grid integration results.
-    write(13,*) 0, 1.d0
-    write(13,*) MAX_NGRID, 1.d0
-    write(13,'(a)') '&'
+    open(unit=io,file='quadrature_int.agr',status='replace',iostat=ierr)
+    if (ierr/=0) call quit()
     do i = 1, NFUNCTION
       do ngrid = 2, MAX_NGRID
         if (grid_failed(ngrid)) cycle
-        write(13,*) ngrid, abs(fexpval(i,ngrid)-fint(i))/abs(fexpval(i,ngrid))
+        write(io,*) ngrid, abs(fexpval(i,ngrid)-fint(i))/abs(fexpval(i,ngrid))
       enddo ! ngrid
-      write(13,'(a)') '&'
+      write(io,'(a)') '&'
     enddo ! i
+    close(io)
 
   END SUBROUTINE main
 
@@ -434,7 +494,7 @@ CONTAINS
 
 
   SUBROUTINE get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, &
-     &vratio, nplot)
+     &vratio, all_eigval, all_eigvec)
     !---------------------------------------------------------!
     ! Given a one-dimensional (anharmonic) potential,         !
     !                                                         !
@@ -461,7 +521,8 @@ CONTAINS
     INTEGER, INTENT(in) :: norder, norder_v
     DOUBLE PRECISION, INTENT(in) :: vcoeff(0:norder_v)
     DOUBLE PRECISION, INTENT(inout) :: e0, orbcoeff(0:norder), vratio
-    INTEGER, INTENT(in), OPTIONAL :: nplot
+    DOUBLE PRECISION, INTENT(inout), OPTIONAL :: all_eigval(0:norder), &
+       &all_eigvec(0:norder,0:norder)
     ! Eigenproblem arrays.
     DOUBLE PRECISION alpha(0:norder), hmatrix(0:norder,0:norder), &
        &cmatrix(0:norder,0:norder)
@@ -471,13 +532,7 @@ CONTAINS
     DOUBLE PRECISION, ALLOCATABLE :: lapack_work(:)
     INTEGER, ALLOCATABLE :: lapack_iwork(:)
     INTEGER lapack_lwork, lapack_liwork
-    ! Variables for plotting.
-    DOUBLE PRECISION, ALLOCATABLE :: hbasis(:)
-    DOUBLE PRECISION x, vx, psix
     ! Parameters.
-    DOUBLE PRECISION, PARAMETER :: PLOT_ORB_SCALE_FACTOR = 1.d0
-    DOUBLE PRECISION, PARAMETER :: PLOT_MAX_X = 5.d0 ! on either side of zero
-    INTEGER, PARAMETER :: PLOT_NPOINT = 200 ! on either side of zero
     DOUBLE PRECISION, PARAMETER :: TOL_ZERO = 1.d3*epsilon(1.d0)
     ! Numerical constants.
     DOUBLE PRECISION, PARAMETER :: pi = 4.d0*atan(1.d0)
@@ -486,7 +541,7 @@ CONTAINS
     ! Virial ratio evaluation.
     DOUBLE PRECISION vircoeff(0:norder_v), xdv_expval, t_expval
     ! Misc local variables.
-    INTEGER i, j, k, iplot, ierr
+    INTEGER i, j, k, ierr
     DOUBLE PRECISION t1, t2
 
     ! Get numerical constants to speed up operations.
@@ -581,33 +636,10 @@ CONTAINS
     e0 = alpha(0)
     orbcoeff(0:norder) = cmatrix(0:norder,0)
 
-    ! Optionally, plot potential and first NPLOT eigenstates in xmgrace format
-    ! to Fortran unit 11.
-    if (present(nplot)) then
-      allocate (hbasis(0:norder))
-      ! Plot V(x).
-      do i = -PLOT_NPOINT, PLOT_NPOINT
-        x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
-        call eval_hermite_poly_norm (norder_v, x, hbasis)
-        vx = sum(vcoeff(0:norder_v)*hbasis(0:norder_v))
-        write(11,*) x, vx
-      enddo ! i
-      ! Plot Psi_n(x).
-      do iplot = 0, min(norder,nplot)
-        write(11,'(a)') '&'
-        write(11,*) -PLOT_MAX_X, alpha(iplot)
-        write(11,*) PLOT_MAX_X, alpha(iplot)
-        write(11,'(a)') '&'
-        do i = -PLOT_NPOINT, PLOT_NPOINT
-          x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
-          call eval_hermite_poly_norm (norder, x, hbasis)
-          t1 = exp(-0.5d0*x*x)
-          psix = t1*sum(cmatrix(0:norder,iplot)*hbasis(0:norder))
-          write(11,*) x, alpha(iplot)+PLOT_ORB_SCALE_FACTOR*psix
-        enddo ! i
-      enddo ! iplot
-      deallocate (hbasis)
-    endif
+    ! Copy data for all eigenstates if requested.
+    if (present(all_eigval)) all_eigval(0:norder) = alpha(0:norder)
+    if (present(all_eigvec)) all_eigvec(0:norder,0:norder) = &
+       &cmatrix(0:norder,0:norder)
 
   END SUBROUTINE get_ground_state
 
