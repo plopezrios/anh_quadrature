@@ -136,7 +136,7 @@ CONTAINS
     enddo ! i
     ! Plot Psi_n(x).
     plot_orb_scale_factor = 0.5d0*minval(all_eigval(1:min(norder,MAX_NORDER))- &
-       &                                 all_eigval(0:min(norder,MAX_NORDER-1)))
+       &                                 all_eigval(0:min(norder,MAX_NORDER)-1))
     do iplot = 0, min(norder,MAX_NORDER)
       if (all_eigval(iplot)>max_vx) cycle
       write(io,'(a)') '&'
@@ -161,6 +161,10 @@ CONTAINS
     write(6,*) 'Expansion order = '//trim(i2s(norder))
     write(6,*) 'E0 (a.u.)       = ', e0*omega
     write(6,*) 'Virial ratio    = ', vratio
+    write(6,*)
+
+    ! Print analytical grids.
+    call report_analytical_grids (ucentre, omega, norder, orbcoeff)
 
     ! Brute-force integration of target function.
     ! Locate integration range.
@@ -772,6 +776,121 @@ CONTAINS
     enddo ! i
 
   END FUNCTION eval_cdf
+
+
+  SUBROUTINE report_analytical_grids (ucentre, omega, norder, orbcoeff)
+    !-------------------------------------------------------!
+    ! Given a ground-state wave function defined by the     !
+    ! coefficients ORBCOEFF(0:NORDER), construct and report !
+    ! small grids we have analytical expressions for.       !
+    !-------------------------------------------------------!
+    IMPLICIT NONE
+    INTEGER, INTENT(in) :: norder
+    DOUBLE PRECISION, INTENT(in) :: ucentre, omega, orbcoeff(0:norder)
+    DOUBLE PRECISION, ALLOCATABLE :: grid_x(:), grid_P(:), xpower_expval(:)
+    DOUBLE PRECISION inv_sqrt_omega, t1, t2, t3
+    INTEGER ngrid, iexp, i
+
+    write(6,*) 'Analytical grids'
+    write(6,*) '================'
+    write(6,*)
+
+    inv_sqrt_omega = 1.d0/sqrt(omega)
+
+    ! Symmetric two-point grid.
+    ngrid = 2
+    write(6,*) 'Symmetric '//trim(i2s(ngrid))//'-point grid:'
+    allocate (grid_x(ngrid), grid_P(ngrid), xpower_expval(0:2*ngrid-1))
+    do iexp = 0, 2*ngrid-1
+      xpower_expval(iexp) = eval_xpower_expval (norder, orbcoeff, iexp)
+    enddo ! iexp
+    grid_x(1) = -sqrt(xpower_expval(2))
+    grid_P(1) = 0.5d0
+    grid_x(2) = sqrt(xpower_expval(2))
+    grid_P(2) = 0.5d0
+    do i = 1, ngrid
+      write(6,*) '  u_'//trim(i2s(i))//', P_'//trim(i2s(i))//' = ', &
+         &grid_x(i)*inv_sqrt_omega - ucentre, grid_P(i)
+    enddo ! i
+    write(6,*)
+    deallocate(grid_x, grid_P, xpower_expval)
+
+    ! Symmetric three-point grid.
+    ngrid = 3
+    write(6,*) 'Symmetric '//trim(i2s(ngrid))//'-point grid:'
+    allocate (grid_x(ngrid), grid_P(ngrid), xpower_expval(0:2*ngrid-1))
+    do iexp = 0, 2*ngrid-1
+      xpower_expval(iexp) = eval_xpower_expval (norder, orbcoeff, iexp)
+    enddo ! iexp
+    grid_x(1) = -sqrt(xpower_expval(4)/xpower_expval(2))
+    grid_P(1) = 0.5d0*xpower_expval(2)**2/xpower_expval(4)
+    grid_x(2) = 0.d0
+    grid_P(2) = 1.d0 - xpower_expval(2)**2/xpower_expval(4)
+    grid_x(3) = sqrt(xpower_expval(4)/xpower_expval(2))
+    grid_P(3) = 0.5d0*xpower_expval(2)**2/xpower_expval(4)
+    do i = 1, ngrid
+      write(6,*) '  u_'//trim(i2s(i))//', P_'//trim(i2s(i))//' = ', &
+         &grid_x(i)*inv_sqrt_omega - ucentre, grid_P(i)
+    enddo ! i
+    write(6,*)
+    deallocate(grid_x, grid_P, xpower_expval)
+
+    ! Symmetric four-point grid.
+    ngrid = 4
+    write(6,*) 'Symmetric '//trim(i2s(ngrid))//'-point grid:'
+    allocate (grid_x(ngrid), grid_P(ngrid), xpower_expval(0:2*ngrid-1))
+    do iexp = 0, 2*ngrid-1
+      xpower_expval(iexp) = eval_xpower_expval (norder, orbcoeff, iexp)
+    enddo ! iexp
+    t1 = xpower_expval(6) - xpower_expval(2)*xpower_expval(4)
+    t2 = xpower_expval(4) - xpower_expval(2)**2
+    t3 = sqrt( &
+       &xpower_expval(6)**2 + &
+       &2.d0*xpower_expval(2)*xpower_expval(6)*&
+       &     (2.d0*xpower_expval(2)**2 - 3.d0*xpower_expval(4)) + &
+       &xpower_expval(4)**2*(4.d0*xpower_expval(4) - 3.d0*xpower_expval(2)**2) )
+    grid_x(1) = -sqrt(0.5d0*(t1+t3)/t2)
+    grid_P(1) = 0.25d0 - 0.25d0*(t1-2.d0*xpower_expval(2)*t2)/t3
+    grid_x(2) = -sqrt(0.5d0*(t1-t3)/t2)
+    grid_P(2) = 0.25d0 + 0.25d0*(t1-2.d0*xpower_expval(2)*t2)/t3
+    grid_x(3) = sqrt(0.5d0*(t1-t3)/t2)
+    grid_P(3) = 0.25d0 + 0.25d0*(t1-2.d0*xpower_expval(2)*t2)/t3
+    grid_x(4) = sqrt(0.5d0*(t1+t3)/t2)
+    grid_P(4) = 0.25d0 - 0.25d0*(t1-2.d0*xpower_expval(2)*t2)/t3
+    do i = 1, ngrid
+      write(6,*) '  u_'//trim(i2s(i))//', P_'//trim(i2s(i))//' = ', &
+         &grid_x(i)*inv_sqrt_omega - ucentre, grid_P(i)
+    enddo ! i
+    write(6,*)
+    deallocate(grid_x, grid_P, xpower_expval)
+
+    ! Non-symmetric two-point grid.
+    ngrid = 2
+    write(6,*) 'Non-symmetric '//trim(i2s(ngrid))//'-point grid:'
+    allocate (grid_x(ngrid), grid_P(ngrid), xpower_expval(0:2*ngrid-1))
+    do iexp = 0, 2*ngrid-1
+      xpower_expval(iexp) = eval_xpower_expval (norder, orbcoeff, iexp)
+    enddo ! iexp
+    if (abs(xpower_expval(3))<1.d3*epsilon(1.d0)) then
+      write(6,*) '  Third moment is zero, so grid reduces to symmetric.'
+    else
+      t1 = xpower_expval(3) - 3.d0*xpower_expval(1)*xpower_expval(2) + &
+         &2.d0*xpower_expval(1)**3
+      t2 = xpower_expval(2) - xpower_expval(1)**2
+      t3 = sqrt(4.d0*t2**3 + t1**2)
+      grid_x(1) = xpower_expval(1) - 2.d0*t2**2/(t1+t3)
+      grid_x(2) = xpower_expval(1) + 0.5d0*(t1+t3)/t2
+      grid_P(1) = 0.5d0*(1.d0 + t1/t3)
+      grid_P(2) = 0.5d0*(1.d0 - t1/t3)
+      do i = 1, ngrid
+        write(6,*) '  u_'//trim(i2s(i))//', P_'//trim(i2s(i))//' = ', &
+           &grid_x(i)*inv_sqrt_omega - ucentre, grid_P(i)
+      enddo ! i
+    endif
+    write(6,*)
+    deallocate(grid_x, grid_P, xpower_expval)
+
+  END SUBROUTINE report_analytical_grids
 
 
   SUBROUTINE solve_grid_newton (ngrid, xpower_expval, norder, orbcoeff, &
