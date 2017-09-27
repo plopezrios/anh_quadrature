@@ -50,8 +50,9 @@ CONTAINS
     INTEGER, PARAMETER :: MAX_NGRID = 10
     INTEGER, PARAMETER :: NPOINT_BRUTE_FORCE = 10000
     DOUBLE PRECISION, PARAMETER :: CDF_TOL = 1.d-8
-    DOUBLE PRECISION x, u, fu(NFUNCTION), fint(NFUNCTION), &
-       &fexpval(NFUNCTION,MAX_NGRID), dx, xl, xr
+    DOUBLE PRECISION x, u, fu(NFUNCTION), fint(NFUNCTION), fvar(NFUNCTION), &
+       &fexpval(NFUNCTION,MAX_NGRID), fvarexpval(NFUNCTION,MAX_NGRID), &
+       &dx, xl, xr
     DOUBLE PRECISION, ALLOCATABLE :: hbasis(:)
     LOGICAL grid_failed(MAX_NGRID)
     ! Misc local variables.
@@ -167,11 +168,15 @@ CONTAINS
     call report_analytical_grids (ucentre, omega, norder, orbcoeff)
 
     ! Brute-force integration of target function.
+    write(6,*) 'Uniform-grid integration of test functions'
+    write(6,*) '=========================================='
     ! Locate integration range.
     allocate(hbasis(0:norder))
     xl = locate_quantile(norder,orbcoeff,CDF_TOL)
     xr = locate_quantile(norder,orbcoeff,1.d0-CDF_TOL)
     dx = (xr-xl)/dble(NPOINT_BRUTE_FORCE)
+    write(6,*) 'Interval: [', xl, ':', xr,']'
+    write(6,*) 'Integral values and variances:'
     fint = 0.d0
     do i = 0, NPOINT_BRUTE_FORCE
       x = xl + (dble(i)/dble(NPOINT_BRUTE_FORCE))*(xr-xl)
@@ -181,10 +186,18 @@ CONTAINS
       call eval_test_functions (u, fu)
       fint = fint + fu*exp(-x*x)*t1*t1*dx
     enddo ! i
-    do i = 1, NFUNCTION
-      write(6,*) '<f_'//trim(i2s(i))//'>           = ', fint(i)
+    fvar = 0.d0
+    do i = 0, NPOINT_BRUTE_FORCE
+      x = xl + (dble(i)/dble(NPOINT_BRUTE_FORCE))*(xr-xl)
+      u = x*inv_sqrt_omega - ucentre
+      call eval_hermite_poly_norm (norder, x, hbasis)
+      t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
+      call eval_test_functions (u, fu)
+      fvar = fvar + (fu-fint)**2*exp(-x*x)*t1*t1*dx
     enddo ! i
-    write(6,*) 'Int. range      = [', xl, ':', xr,']'
+    do i = 1, NFUNCTION
+      write(6,*) '  <f_'//trim(i2s(i))//'> = ', fint(i), fvar(i)
+    enddo ! i
     write(6,*)
     deallocate(hbasis)
 
@@ -226,10 +239,13 @@ CONTAINS
     close(io)
 
     ! Loop over quadrature grid sizes.
+    write(6,*) 'Numerical grids'
+    write(6,*) '==============='
     open(unit=io,file='quadrature_grid.agr',status='replace',iostat=ierr)
     if (ierr/=0) call quit()
     grid_failed = .false.
     fexpval = 0.d0
+    fvarexpval = 0.d0
     do ngrid = 2, MAX_NGRID
       allocate(xpower_expval(0:2*ngrid-1), grid_x(ngrid), grid_P(ngrid))
       ! Evaluate expectation values of <x^i>.
@@ -267,9 +283,17 @@ CONTAINS
           call eval_test_functions (u, fu)
           fexpval(:,ngrid) = fexpval(:,ngrid) + grid_P(igrid)*fu(:)
         enddo ! igrid
+        do igrid = 1, ngrid
+          x = grid_x(igrid)
+          u = x*inv_sqrt_omega - ucentre
+          call eval_test_functions (u, fu)
+          fvarexpval(:,ngrid) = fvarexpval(:,ngrid) + &
+             &grid_P(igrid)*(fu(:)-fexpval(:,ngrid))**2
+        enddo ! igrid
         write(6,*)'  Integration tests:'
         do i = 1, NFUNCTION
-          write(6,*)'    <f_'//trim(i2s(i))//'> = ', fexpval(i,ngrid)
+          write(6,*)'    <f_'//trim(i2s(i))//'> = ', fexpval(i,ngrid), &
+             &fvarexpval(i,ngrid)
         enddo ! i
       endif
       write(6,*)
@@ -793,7 +817,6 @@ CONTAINS
 
     write(6,*) 'Analytical grids'
     write(6,*) '================'
-    write(6,*)
 
     inv_sqrt_omega = 1.d0/sqrt(omega)
 
@@ -812,7 +835,6 @@ CONTAINS
       write(6,*) '  u_'//trim(i2s(i))//', P_'//trim(i2s(i))//' = ', &
          &grid_x(i)*inv_sqrt_omega - ucentre, grid_P(i)
     enddo ! i
-    write(6,*)
     deallocate(grid_x, grid_P, xpower_expval)
 
     ! Symmetric three-point grid.
@@ -832,7 +854,6 @@ CONTAINS
       write(6,*) '  u_'//trim(i2s(i))//', P_'//trim(i2s(i))//' = ', &
          &grid_x(i)*inv_sqrt_omega - ucentre, grid_P(i)
     enddo ! i
-    write(6,*)
     deallocate(grid_x, grid_P, xpower_expval)
 
     ! Symmetric four-point grid.
@@ -861,7 +882,6 @@ CONTAINS
       write(6,*) '  u_'//trim(i2s(i))//', P_'//trim(i2s(i))//' = ', &
          &grid_x(i)*inv_sqrt_omega - ucentre, grid_P(i)
     enddo ! i
-    write(6,*)
     deallocate(grid_x, grid_P, xpower_expval)
 
     ! Non-symmetric two-point grid.
@@ -871,24 +891,21 @@ CONTAINS
     do iexp = 0, 2*ngrid-1
       xpower_expval(iexp) = eval_xpower_expval (norder, orbcoeff, iexp)
     enddo ! iexp
-    if (abs(xpower_expval(3))<1.d3*epsilon(1.d0)) then
-      write(6,*) '  Third moment is zero, so grid reduces to symmetric.'
-    else
-      t1 = xpower_expval(3) - 3.d0*xpower_expval(1)*xpower_expval(2) + &
-         &2.d0*xpower_expval(1)**3
-      t2 = xpower_expval(2) - xpower_expval(1)**2
-      t3 = sqrt(4.d0*t2**3 + t1**2)
-      grid_x(1) = xpower_expval(1) - 2.d0*t2**2/(t1+t3)
-      grid_x(2) = xpower_expval(1) + 0.5d0*(t1+t3)/t2
-      grid_P(1) = 0.5d0*(1.d0 + t1/t3)
-      grid_P(2) = 0.5d0*(1.d0 - t1/t3)
-      do i = 1, ngrid
-        write(6,*) '  u_'//trim(i2s(i))//', P_'//trim(i2s(i))//' = ', &
-           &grid_x(i)*inv_sqrt_omega - ucentre, grid_P(i)
-      enddo ! i
-    endif
-    write(6,*)
+    t1 = xpower_expval(3) - 3.d0*xpower_expval(1)*xpower_expval(2) + &
+       &2.d0*xpower_expval(1)**3
+    t2 = xpower_expval(2) - xpower_expval(1)**2
+    t3 = sqrt(4.d0*t2**3 + t1**2)
+    grid_x(1) = xpower_expval(1) - 2.d0*t2**2/(t1+t3)
+    grid_x(2) = xpower_expval(1) + 0.5d0*(t1+t3)/t2
+    grid_P(1) = 0.5d0*(1.d0 + t1/t3)
+    grid_P(2) = 0.5d0*(1.d0 - t1/t3)
+    do i = 1, ngrid
+      write(6,*) '  u_'//trim(i2s(i))//', P_'//trim(i2s(i))//' = ', &
+         &grid_x(i)*inv_sqrt_omega - ucentre, grid_P(i)
+    enddo ! i
     deallocate(grid_x, grid_P, xpower_expval)
+
+    write(6,*)
 
   END SUBROUTINE report_analytical_grids
 
@@ -1180,8 +1197,8 @@ CONTAINS
     IMPLICIT NONE
     DOUBLE PRECISION, INTENT(in) :: u
     DOUBLE PRECISION, INTENT(inout) :: f(6)
-    f(1) = exp(-(u+0.5)**2)
-    f(2) = 1.d0 / (1.d0 + 5.d0*(u-0.5d0)**2)
+    f(1) = 1.d0 / (1.d0 + 5.d0*(u-0.5d0)**2)
+    f(2) = -4.25d0*u + u**2 + 1.d0*u**3
     f(3) = 0.5d0+0.5d0*cos(4.d0*u)
     f(4) = u**2
     f(5) = 0.25d0-u**2+u**4
