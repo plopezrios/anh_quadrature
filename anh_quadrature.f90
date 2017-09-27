@@ -46,10 +46,10 @@ CONTAINS
     DOUBLE PRECISION, ALLOCATABLE :: grid_x(:), grid_p(:)
     ! Evaluation of expectation value of v(x).
     !INTEGER, PARAMETER :: PLOT_NPOINT = 200
-    INTEGER, PARAMETER :: NFUNCTION = 6
+    INTEGER, PARAMETER :: NFUNCTION = 4
     INTEGER, PARAMETER :: MAX_NGRID = 10
     INTEGER, PARAMETER :: NPOINT_BRUTE_FORCE = 10000
-    DOUBLE PRECISION, PARAMETER :: CDF_TOL = 1.d-8
+    DOUBLE PRECISION, PARAMETER :: CDF_TOL = epsilon(1.d0)
     DOUBLE PRECISION x, u, fu(NFUNCTION), fint(NFUNCTION), fvar(NFUNCTION), &
        &fexpval(NFUNCTION,MAX_NGRID), fvarexpval(NFUNCTION,MAX_NGRID), &
        &dx, xl, xr
@@ -57,8 +57,10 @@ CONTAINS
     LOGICAL grid_failed(MAX_NGRID)
     ! Misc local variables.
     CHARACTER(2048) line
-    INTEGER i, j, iexp, igrid, ierr
-    DOUBLE PRECISION t1
+    INTEGER i, j, iexp, igrid, ierr, ivar
+    DOUBLE PRECISION t1, intgrnd1(NFUNCTION), intgrnd2(NFUNCTION), &
+       &prev_int(NFUNCTION), curr_int(NFUNCTION), int_best(NFUNCTION)
+    LOGICAL int_converged(NFUNCTION)
     INTEGER, PARAMETER :: io=10
 
     ! Get V coefficients and norder.
@@ -176,25 +178,46 @@ CONTAINS
     xr = locate_quantile(norder,orbcoeff,1.d0-CDF_TOL)
     dx = (xr-xl)/dble(NPOINT_BRUTE_FORCE)
     write(6,*) 'Interval: [', xl, ':', xr,']'
-    write(6,*) 'Integral values and variances:'
     fint = 0.d0
-    do i = 0, NPOINT_BRUTE_FORCE
-      x = xl + (dble(i)/dble(NPOINT_BRUTE_FORCE))*(xr-xl)
-      u = x*inv_sqrt_omega - ucentre
-      call eval_hermite_poly_norm (norder, x, hbasis)
-      t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
-      call eval_test_functions (u, fu)
-      fint = fint + fu*exp(-x*x)*t1*t1*dx
-    enddo ! i
     fvar = 0.d0
-    do i = 0, NPOINT_BRUTE_FORCE
-      x = xl + (dble(i)/dble(NPOINT_BRUTE_FORCE))*(xr-xl)
-      u = x*inv_sqrt_omega - ucentre
-      call eval_hermite_poly_norm (norder, x, hbasis)
-      t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
-      call eval_test_functions (u, fu)
-      fvar = fvar + (fu-fint)**2*exp(-x*x)*t1*t1*dx
-    enddo ! i
+    do ivar = 0, 1
+      int_converged = .false.
+      prev_int = 0.d0
+      ! Loop over uniform grid sizes.
+      ngrid = 100
+      do
+        dx = (xr-xl)/dble(ngrid)
+        curr_int = 0.d0
+        intgrnd2 = 0.d0
+        do i = 0, ngrid
+          intgrnd1 = intgrnd2
+          x = xl + (dble(i)/dble(ngrid))*(xr-xl)
+          u = x*inv_sqrt_omega - ucentre
+          call eval_hermite_poly_norm (norder, x, hbasis)
+          t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
+          call eval_test_functions (u, fu)
+          if (ivar==1) fu = (fu-fint)**2
+          intgrnd2 = fu*exp(-x*x)*t1*t1*dx
+          if (i/=0) curr_int = curr_int + 0.5d0*(intgrnd1+intgrnd2)
+        enddo ! i
+        where (.not.int_converged) int_best = curr_int
+        int_converged = abs(int_best-prev_int)<1.d-11*abs(int_best)
+        prev_int = int_best
+        if (all(int_converged)) exit
+        ngrid = nint(dble(ngrid)*2.d0)
+        if (ngrid>1e7) exit
+      enddo ! grid sizes
+      if (ivar==0) then
+        if (any(.not.int_converged)) write(6,*) '<f> convergence flags: ', &
+           &int_converged
+        fint = int_best
+      else
+        if (any(.not.int_converged)) write(6,*) 'var[f] convergence flags: ', &
+           &int_converged
+        fvar = int_best
+      endif
+    enddo ! ivar
+    write(6,*) 'Integral values and variances:'
     do i = 1, NFUNCTION
       write(6,*) '  <f_'//trim(i2s(i))//'> = ', fint(i), fvar(i)
     enddo ! i
@@ -721,44 +744,52 @@ CONTAINS
     IMPLICIT NONE
     INTEGER, INTENT(in) :: norder
     DOUBLE PRECISION, INTENT(in) :: orbcoeff(0:norder), p
+    DOUBLE PRECISION, PARAMETER :: ABS_TOL = 1.d-8
     DOUBLE PRECISION, PARAMETER :: REL_TOL = 1.d-3
-    DOUBLE PRECISION x, f, x1, f1, x2, f2
+    DOUBLE PRECISION x, f, x1, f1, x2, f2, dx
 
     if (p<=0.d0 .or. p>=1.d0) call quit('Asked for impossible quantile.')
     locate_quantile = 0.d0
 
     ! Get initial pair of points.
     x1 = 0.d0
+    x2 = 0.d0
     f1 = eval_cdf (norder, orbcoeff, x1)
+    f2 = f1
+    dx = 1.d0
     if (f1>p) then
-      x2 = -1.d0
+      do while (f1>p)
+        x2 = x1
+        f2 = f1
+        x1 = x1 - dx
+        f1 = eval_cdf (norder, orbcoeff, x1)
+        dx = dx*1.5d0
+      enddo
     elseif (f1<p) then
-      x2 = 1.d0
-    else
-      return
+      do while (f2<p)
+        x1 = x2
+        f1 = f2
+        x2 = x2 + dx
+        f2 = eval_cdf (norder, orbcoeff, x2)
+        dx = dx*1.5d0
+      enddo
     endif
-    f2 = eval_cdf (norder, orbcoeff, x2)
 
     ! Loop until convergence.
-    x = (x1+x2)/0.5d0
     do
-      if (abs(f2-f1)<1.d-12) then
-        if (p<min(f1,f2)) then
-          x = min(x1,x2)-0.1d0*(1.d0+abs(min(x1,x2)))
-        elseif (p>min(f1,f2)) then
-          x = max(x1,x2)+0.1d0*(1.d0+abs(min(x1,x2)))
-        else
-          exit
-        endif
-      else
-        x = x1 + 0.5d0*(p-f1)*((x2-x1)/(f2-f1))
-      endif
+      !x = x1 + 0.5d0*(p-f1)*((x2-x1)/(f2-f1))
+      !if (x<=x1.or.x>=x2) x = 0.5d0*(x1+x2) ! guard against poor numerics
+      x = 0.5d0*(x1+x2) ! pure bisection
+      if (x<=x1.or.x>=x2) exit ! regard as converged
       f = eval_cdf (norder, orbcoeff, x)
-      if (abs(f-p)<REL_TOL*min(p,1.d0-p)) exit
-      f1 = f2
-      x1 = x2
-      f2 = f
-      x2 = x
+      if (abs(f-p)<min(ABS_TOL,REL_TOL*min(p,1.d0-p))) exit
+      if (f>p) then
+        x2 = x
+        f2 = f
+      else
+        x1 = x
+        f1 = f
+      endif
     enddo
     locate_quantile = x
 
@@ -925,7 +956,7 @@ CONTAINS
     ! Maximum number of Nweton's method iterations to attempt.
     INTEGER, PARAMETER :: MAX_ITER = 500
     LOGICAL, PARAMETER :: VERBOSE = .false.
-    DOUBLE PRECISION, PARAMETER :: F_TOL = 1.d-12
+    DOUBLE PRECISION, PARAMETER :: F_TOL = 1.d-15
     ! Misc local variables.
     DOUBLE PRECISION fvec(2*ngrid), Jmat(2*ngrid,2*ngrid), &
        &grid_P_test(ngrid), grid_x_test(ngrid), x0max, x, &
@@ -1196,13 +1227,11 @@ CONTAINS
     !---------------------------------------------------------!
     IMPLICIT NONE
     DOUBLE PRECISION, INTENT(in) :: u
-    DOUBLE PRECISION, INTENT(inout) :: f(6)
-    f(1) = 1.d0 / (1.d0 + 5.d0*(u-0.5d0)**2)
-    f(2) = -4.25d0*u + u**2 + 1.d0*u**3
-    f(3) = 0.5d0+0.5d0*cos(4.d0*u)
-    f(4) = u**2
-    f(5) = 0.25d0-u**2+u**4
-    f(6) = abs(u)
+    DOUBLE PRECISION, INTENT(inout) :: f(4)
+    f(1) = -u**2+u**4
+    f(2) = -u**3+u**6
+    f(3) = (u**2+abs(u**3))/(1.d0+u**2)
+    f(4) = abs(u)
   END SUBROUTINE eval_test_functions
 
 
