@@ -38,8 +38,7 @@ CONTAINS
     INTEGER iplot
     DOUBLE PRECISION max_vx, psix, vx, plot_orb_scale_factor
     DOUBLE PRECISION, ALLOCATABLE :: all_eigval(:), all_eigvec(:,:)
-    DOUBLE PRECISION, PARAMETER :: PLOT_MAX_X = 5.d0 ! on either side of zero
-    INTEGER, PARAMETER :: PLOT_NPOINT = 200 ! on either side of zero
+    INTEGER, PARAMETER :: PLOT_NPOINT = 200
     ! Variables for quadrature grid.
     INTEGER ngrid
     DOUBLE PRECISION, ALLOCATABLE :: xpower_expval(:)
@@ -48,18 +47,20 @@ CONTAINS
     !INTEGER, PARAMETER :: PLOT_NPOINT = 200
     INTEGER, PARAMETER :: NFUNCTION = 4
     INTEGER, PARAMETER :: MAX_NGRID = 10
-    INTEGER, PARAMETER :: NPOINT_BRUTE_FORCE = 10000
     DOUBLE PRECISION, PARAMETER :: CDF_TOL = epsilon(1.d0)
-    DOUBLE PRECISION x, u, fu(NFUNCTION), fint(NFUNCTION), fvar(NFUNCTION), &
-       &fexpval(NFUNCTION,MAX_NGRID), fvarexpval(NFUNCTION,MAX_NGRID), &
-       &dx, xl, xr
+    DOUBLE PRECISION x, u, fu(NFUNCTION), fmu(NFUNCTION), fint(NFUNCTION), &
+       &fvar(NFUNCTION), fstarvar(NFUNCTION), fexpval(NFUNCTION,MAX_NGRID), &
+       &fvarexpval(NFUNCTION,MAX_NGRID), fstarvarexpval(NFUNCTION,MAX_NGRID), &
+       &dx, xl, xr, ul, ur
     DOUBLE PRECISION, ALLOCATABLE :: hbasis(:)
     LOGICAL grid_failed(MAX_NGRID)
     ! Misc local variables.
     CHARACTER(2048) line
+    CHARACTER(64) char1, char2
     INTEGER i, j, iexp, igrid, ierr, ivar
     DOUBLE PRECISION t1, intgrnd1(NFUNCTION), intgrnd2(NFUNCTION), &
-       &prev_int(NFUNCTION), curr_int(NFUNCTION), int_best(NFUNCTION)
+       &prev_int(NFUNCTION), curr_int(NFUNCTION), int_best(NFUNCTION), &
+       &du, Pscale
     LOGICAL int_converged(NFUNCTION)
     INTEGER, PARAMETER :: io=10
 
@@ -123,37 +124,90 @@ CONTAINS
        &'WARNING: failed to converge virial ratio to target accuracy.'
     norder = min(norder,MAX_NORDER)
 
+    ! Find range of x where wave function is non-negligible.
+    xl = locate_quantile(norder,orbcoeff,CDF_TOL)
+    xr = locate_quantile(norder,orbcoeff,1.d0-CDF_TOL)
+    ul = xl*inv_sqrt_omega - ucentre
+    ur = xr*inv_sqrt_omega - ucentre
+
     ! Plot solution.
     open(unit=io,file='1D_schroedinger.agr',status='replace',iostat=ierr)
     if (ierr/=0) call quit()
+    write(char1,*) ul
+    char1 = adjustl(char1)
+    write(char2,*) ur
+    char2 = adjustl(char2)
+    write(io,'(a)')'@page size 792, 612'
+    write(io,'(a)')'@map font 0 to "Times-Roman", "Times-Roman"'
+    write(io,'(a)')'@map font 1 to "Times-Italic", "Times-Italic"'
+    write(io,'(a)')'@map font 2 to "Times-Bold", "Times-Bold"'
+    write(io,'(a)')'@default linewidth 3.0'
+    write(io,'(a)')'@default font 0'
+    write(io,'(a)')'@default char size 1.5'
+    write(io,'(a)')'@page background fill off'
+    write(io,'(a)')'@autoscale onread none'
+    write(io,'(a)')'@g0 on'
+    write(io,'(a)')'@with g0'
+    write(io,'(a)')'@    world '//trim(char1)//', -0.5, '//trim(char2)//', 3'
+    write(io,'(a)')'@    view 0.200000, 0.200000, 1.200000, 0.900000'
+    write(io,'(a)')'@    frame linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major size 1.0'
+    write(io,'(a)')'@    xaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    xaxis tick minor size 0.5'
+    write(io,'(a)')'@    xaxis tick major 2'
+    write(io,'(a)')'@    xaxis tick minor ticks 1'
+    write(io,'(a)')'@    yaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    yaxis tick major size 1.0'
+    write(io,'(a)')'@    yaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    yaxis tick minor size 0.5'
+    write(io,'(a)')'@    yaxis tick major 1'
+    write(io,'(a)')'@    yaxis tick minor ticks 1'
+    write(io,'(a)')'@    xaxis label "\1u\0 (a.u.)"'
+    write(io,'(a)')'@    xaxis label char size 1.750000'
+    write(io,'(a)')'@    yaxis label "\1V\0(\1u\0) (a.u.)"'
+    write(io,'(a)')'@    yaxis label char size 1.750000'
     allocate (hbasis(0:norder))
     ! Plot V(x).
+    write(io,'(a)')'@g0.s0 linewidth 3'
+    write(io,'(a)')'@g0.s0 line color 1'
+    write(io,'(a)')'@target G0.S0'
+    write(io,'(a)')'@type xy'
     max_vx = 0.d0
-    do i = -PLOT_NPOINT, PLOT_NPOINT
-      x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
+    do i = 0, PLOT_NPOINT
+      x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
       u = x*inv_sqrt_omega - ucentre
       call eval_hermite_poly_norm (norder_v, x, hbasis)
       vx = sum(vcoeff(0:norder_v)*hbasis(0:norder_v))
       if (i==-PLOT_NPOINT .or. vx>max_vx) max_vx = vx
       write(io,*) u, vx*omega
     enddo ! i
+    write(io,'(a)') '&'
     ! Plot Psi_n(x).
     plot_orb_scale_factor = 0.5d0*minval(all_eigval(1:min(norder,MAX_NORDER))- &
        &                                 all_eigval(0:min(norder,MAX_NORDER)-1))
     do iplot = 0, min(norder,MAX_NORDER)
       if (all_eigval(iplot)>max_vx) cycle
+      write(io,'(a)')'@g0.s'//trim(i2s(2*iplot+1))//' linewidth 2'
+      write(io,'(a)')'@g0.s'//trim(i2s(2*iplot+1))//' line color 7'
+      write(io,'(a)')'@target G0.S'//trim(i2s(2*iplot+1))
+      write(io,'(a)')'@type xy'
+      write(io,*) ul, all_eigval(iplot)*omega
+      write(io,*) ur, all_eigval(iplot)*omega
       write(io,'(a)') '&'
-      write(io,*) -PLOT_MAX_X*inv_sqrt_omega - ucentre, all_eigval(iplot)*omega
-      write(io,*) PLOT_MAX_X*inv_sqrt_omega - ucentre, all_eigval(iplot)*omega
-      write(io,'(a)') '&'
+      write(io,'(a)')'@g0.s'//trim(i2s(2*iplot+2))//' linewidth 2'
+      write(io,'(a)')'@g0.s'//trim(i2s(2*iplot+2))//' line color 4'
+      write(io,'(a)')'@target G0.S'//trim(i2s(2*iplot+2))
+      write(io,'(a)')'@type xy'
       do i = -PLOT_NPOINT, PLOT_NPOINT
-        x = dble(i)/dble(PLOT_NPOINT) * PLOT_MAX_X
+        x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
         u = x*inv_sqrt_omega - ucentre
         call eval_hermite_poly_norm (norder, x, hbasis)
         t1 = exp(-0.5d0*x*x)
         psix = t1*sum(all_eigvec(0:norder,iplot)*hbasis(0:norder))
         write(io,*) u, all_eigval(iplot)*omega + plot_orb_scale_factor*psix
       enddo ! i
+      write(io,'(a)') '&'
     enddo ! iplot
     deallocate (hbasis)
     close(io)
@@ -174,13 +228,11 @@ CONTAINS
     write(6,*) '=========================================='
     ! Locate integration range.
     allocate(hbasis(0:norder))
-    xl = locate_quantile(norder,orbcoeff,CDF_TOL)
-    xr = locate_quantile(norder,orbcoeff,1.d0-CDF_TOL)
-    dx = (xr-xl)/dble(NPOINT_BRUTE_FORCE)
-    write(6,*) 'Interval: [', xl, ':', xr,']'
+    write(6,*) 'Interval: [', ul, ':', ur,']'
     fint = 0.d0
     fvar = 0.d0
-    do ivar = 0, 1
+    fstarvar = 0.d0
+    do ivar = 0, 2
       int_converged = .false.
       prev_int = 0.d0
       ! Loop over uniform grid sizes.
@@ -196,7 +248,11 @@ CONTAINS
           call eval_hermite_poly_norm (norder, x, hbasis)
           t1 = sum(orbcoeff(0:norder)*hbasis(0:norder))
           call eval_test_functions (u, fu)
-          if (ivar==1) fu = (fu-fint)**2
+          if (ivar==2) then
+            call eval_test_functions (-u, fmu)
+            fu = 0.5d0*(fu+fmu)
+          endif
+          if (ivar/=0) fu = (fu-fint)**2
           intgrnd2 = fu*exp(-x*x)*t1*t1*dx
           if (i/=0) curr_int = curr_int + 0.5d0*(intgrnd1+intgrnd2)
         enddo ! i
@@ -211,33 +267,77 @@ CONTAINS
         if (any(.not.int_converged)) write(6,*) '<f> convergence flags: ', &
            &int_converged
         fint = int_best
-      else
+      elseif (ivar==1) then
         if (any(.not.int_converged)) write(6,*) 'var[f] convergence flags: ', &
            &int_converged
         fvar = int_best
+      elseif (ivar==2) then
+        if (any(.not.int_converged)) write(6,*) 'var[f*] convergence flags: ', &
+           &int_converged
+        fstarvar = int_best
       endif
     enddo ! ivar
-    write(6,*) 'Integral values and variances:'
+    write(6,*) 'Integral values and variances and symmetrized variances:'
     do i = 1, NFUNCTION
-      write(6,*) '  <f_'//trim(i2s(i))//'> = ', fint(i), fvar(i)
+      write(6,*) '  <f_'//trim(i2s(i))//'> = ', fint(i), fvar(i), fstarvar(i)
     enddo ! i
     write(6,*)
     deallocate(hbasis)
 
-    ! Plot potential, wave function and test functions against u.
-    open(unit=io,file='int_test_functions.agr',status='replace',iostat=ierr)
+    ! Plot potential against u.
+    open(unit=io,file='functions.agr',status='replace',iostat=ierr)
     if (ierr/=0) call quit()
-    allocate (hbasis(0:norder))
-    ! Plot V(u).
-    do i = 0, PLOT_NPOINT
-      x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
-      u = x*inv_sqrt_omega - ucentre
-      call eval_hermite_poly_norm (norder_v, x, hbasis)
-      write(io,*) u, sum(vcoeff(0:norder_v)*hbasis(0:norder_v))*omega
-    enddo ! i
-    write(io,'(a)') '&'
+    write(char1,*) ul
+    char1 = adjustl(char1)
+    write(char2,*) ur
+    char2 = adjustl(char2)
+    write(io,'(a)')'@page size 792, 612'
+    write(io,'(a)')'@map font 0 to "Times-Roman", "Times-Roman"'
+    write(io,'(a)')'@map font 1 to "Times-Italic", "Times-Italic"'
+    write(io,'(a)')'@map font 2 to "Times-Bold", "Times-Bold"'
+    write(io,'(a)')'@default linewidth 3.0'
+    write(io,'(a)')'@default font 0'
+    write(io,'(a)')'@default char size 1.5'
+    write(io,'(a)')'@page background fill off'
+    write(io,'(a)')'@autoscale onread none'
+    write(io,'(a)')'@g0 on'
+    write(io,'(a)')'@with g0'
+    write(io,'(a)')'@    world '//trim(char1)//', -2, '//trim(char2)//', 9'
+    write(io,'(a)')'@    view 0.20, 0.20, 1.20, 0.90'
+    write(io,'(a)')'@    frame linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major size 1.0'
+    write(io,'(a)')'@    xaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    xaxis tick minor size 0.5'
+    write(io,'(a)')'@    xaxis tick major 2'
+    write(io,'(a)')'@    xaxis tick minor ticks 1'
+    write(io,'(a)')'@    yaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    yaxis tick major size 1.0'
+    write(io,'(a)')'@    yaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    yaxis tick minor size 0.5'
+    write(io,'(a)')'@    yaxis tick major 2'
+    write(io,'(a)')'@    yaxis tick minor ticks 1'
+    write(io,'(a)')'@    xaxis label "\1u\0 (a.u.)"'
+    write(io,'(a)')'@    xaxis label char size 1.75'
+    write(io,'(a)')'@    yaxis label "\1A\0(\1u\0) (a.u.)"'
+    write(io,'(a)')'@    yaxis label char size 1.75'
+    write(char1,*) 0.6d0*ur
+    char1 = adjustl(char1)
+    write(char2,*) -2.d0+0.7d0*(5.d0-(-2.d0))
+    char2 = adjustl(char2)
+    write(io,'(a)')'@    legend box linewidth 2.0'
+    write(io,'(a)')'@    legend loctype world'
+    write(io,'(a)')'@    legend '//trim(char1)//', '//trim(char2)
+    write(io,'(a)')'@    legend char size 1.50'
+    write(io,'(a)')'@    legend length 4'
     ! Plot target functions.
     do j = 1, NFUNCTION
+      write(io,'(a)')'@g0.s'//trim(i2s(j-1))//' linewidth 2'
+      write(io,'(a)')'@g0.s'//trim(i2s(j-1))//' linestyle '//trim(i2s(j))
+      write(io,'(a)')'@g0.s'//trim(i2s(j-1))//' legend "\1A\0\s\v{0.3}'//&
+         &trim(i2s(j))//'\N"'
+      write(io,'(a)')'@target G0.S'//trim(i2s(j-1))
+      write(io,'(a)')'@type xy'
       do i = 0, PLOT_NPOINT
         x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
         u = x*inv_sqrt_omega - ucentre
@@ -246,10 +346,94 @@ CONTAINS
       enddo ! i
       write(io,'(a)') '&'
     enddo ! j
-    ! Plot Psi_0(u).
-    write(io,*) xl*inv_sqrt_omega - ucentre, e0*omega
-    write(io,*) xr*inv_sqrt_omega - ucentre, e0*omega
+    ! Clean up.
+    close(io)
+
+    ! Plot potential, wave function and grid against u.
+    open(unit=io,file='grid.agr',status='replace',iostat=ierr)
+    if (ierr/=0) call quit()
+    write(char1,*) ul
+    char1 = adjustl(char1)
+    write(char2,*) ur
+    char2 = adjustl(char2)
+    write(io,'(a)')'@page size 792, 612'
+    write(io,'(a)')'@map font 0 to "Times-Roman", "Times-Roman"'
+    write(io,'(a)')'@map font 1 to "Times-Italic", "Times-Italic"'
+    write(io,'(a)')'@map font 2 to "Times-Bold", "Times-Bold"'
+    write(io,'(a)')'@default linewidth 3.0'
+    write(io,'(a)')'@default font 0'
+    write(io,'(a)')'@default char size 1.5'
+    write(io,'(a)')'@page background fill off'
+    write(io,'(a)')'@autoscale onread none'
+    write(io,'(a)')'@g0 on'
+    write(io,'(a)')'@with g0'
+    write(io,'(a)')'@    world '//trim(char1)//', -0.5, '//trim(char2)//', 2.5'
+    write(io,'(a)')'@    view 0.20, 0.72, 1.20, 0.90'
+    write(io,'(a)')'@    frame linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major size 1.0'
+    write(io,'(a)')'@    xaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    xaxis tick minor size 0.5'
+    write(io,'(a)')'@    xaxis tick major 2'
+    write(io,'(a)')'@    xaxis tick minor ticks 1'
+    write(io,'(a)')'@    xaxis ticklabel off'
+    write(io,'(a)')'@    yaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    yaxis tick major size 1.0'
+    write(io,'(a)')'@    yaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    yaxis tick minor size 0.5'
+    write(io,'(a)')'@    yaxis tick major 1'
+    write(io,'(a)')'@    yaxis tick minor ticks 1'
+    write(io,'(a)')'@    xaxis label ""'
+    write(io,'(a)')'@    xaxis label char size 1.750000'
+    write(io,'(a)')'@    yaxis label "\1V\0(\1u\0) (a.u.)"'
+    write(io,'(a)')'@    yaxis label char size 1.750000'
+    write(io,'(a)')'@g1 on'
+    write(io,'(a)')'@with g1'
+    write(io,'(a)')'@    world '//trim(char1)//', 1.0, '//trim(char2)//', '//&
+       &trim(i2s(MAX_NGRID+1))//'.5'
+    write(io,'(a)')'@    view 0.20, 0.20, 1.20, 0.70'
+    write(io,'(a)')'@    frame linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major size 1.0'
+    write(io,'(a)')'@    xaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    xaxis tick minor size 0.5'
+    write(io,'(a)')'@    xaxis tick major 2'
+    write(io,'(a)')'@    xaxis tick minor ticks 1'
+    write(io,'(a)')'@    yaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    yaxis tick major size 1.0'
+    write(io,'(a)')'@    yaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    yaxis tick minor size 0.5'
+    write(io,'(a)')'@    yaxis tick major 100'
+    write(io,'(a)')'@    yaxis tick minor ticks 0'
+    write(io,'(a)')'@    xaxis label "\1u\0 (a.u.)"'
+    write(io,'(a)')'@    xaxis label char size 1.750000'
+    write(io,'(a)')'@    yaxis label "Grid point weights"'
+    write(io,'(a)')'@    yaxis label char size 1.750000'
+    allocate (hbasis(0:norder))
+    ! Plot energy eigenvalue.
+    write(io,'(a)')'@g0.s0 linewidth 2'
+    write(io,'(a)')'@g0.s0 line color 7'
+    write(io,'(a)')'@target G0.S0'
+    write(io,'(a)')'@type xy'
+    write(io,*) ul, e0*omega
+    write(io,*) ur, e0*omega
     write(io,'(a)') '&'
+    ! Plot V(u).
+    write(io,'(a)')'@g0.s1 line color 1'
+    write(io,'(a)')'@target G0.S1'
+    write(io,'(a)')'@type xy'
+    do i = 0, PLOT_NPOINT
+      x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
+      u = x*inv_sqrt_omega - ucentre
+      call eval_hermite_poly_norm (norder_v, x, hbasis)
+      write(io,*) u, sum(vcoeff(0:norder_v)*hbasis(0:norder_v))*omega
+    enddo ! i
+    write(io,'(a)') '&'
+    ! Plot Psi_0(u).
+    write(io,'(a)')'@g0.s2 linewidth 2'
+    write(io,'(a)')'@g0.s2 line color 4'
+    write(io,'(a)')'@target G0.S2'
+    write(io,'(a)')'@type xy'
     do i = 0, PLOT_NPOINT
       x = xl + (dble(i)/dble(PLOT_NPOINT))*(xr-xl)
       u = x*inv_sqrt_omega - ucentre
@@ -258,17 +442,16 @@ CONTAINS
          &                      sum(orbcoeff(0:norder)*hbasis(0:norder))
     enddo ! i
     write(io,'(a)') '&'
+    ! Clean up.
     deallocate (hbasis)
-    close(io)
 
     ! Loop over quadrature grid sizes.
     write(6,*) 'Numerical grids'
     write(6,*) '==============='
-    open(unit=io,file='quadrature_grid.agr',status='replace',iostat=ierr)
-    if (ierr/=0) call quit()
     grid_failed = .false.
     fexpval = 0.d0
     fvarexpval = 0.d0
+    j = 0
     do ngrid = 2, MAX_NGRID
       allocate(xpower_expval(0:2*ngrid-1), grid_x(ngrid), grid_P(ngrid))
       ! Evaluate expectation values of <x^i>.
@@ -287,18 +470,43 @@ CONTAINS
         grid_failed(ngrid) = .true.
       else
         ! Report and plot grid.
+        dx = 0.2d0*minval(grid_x(2:ngrid)-grid_x(1:ngrid-1))
+        du = dx*inv_sqrt_omega
+        Pscale = 0.6d0/maxval(grid_P)
+        write(io,'(a)')'@g1.s'//trim(i2s(j))//' line color 7'
+        write(io,'(a)')'@g1.s'//trim(i2s(j))//' linewidth 2'
+        write(io,'(a)')'@target G1.S'//trim(i2s(j))
+        write(io,'(a)')'@type xy'
+        write(io,*) (grid_x(1)-2.d0*dx)*inv_sqrt_omega-ucentre, dble(ngrid)
+        write(io,*) (grid_x(ngrid)+2.d0*dx)*inv_sqrt_omega-ucentre, dble(ngrid)
+        write(io,'(a)')'&'
+        j=j+1
+        write(char1,*)(grid_x(ngrid)+3.d0*dx)*inv_sqrt_omega-ucentre
+        write(io,'(a)')'@with string'
+        write(io,'(a)')'@    string on'
+        write(io,'(a)')'@    string loctype world'
+        write(io,'(a)')'@    string g1'
+        write(io,'(a)')'@    string '//trim(adjustl(char1))//', '//&
+           &trim(i2s(ngrid))
+        write(io,'(a)')'@    string color 1'
+        write(io,'(a)')'@    string font 0'
+        write(io,'(a)')'@    string char size 1.00'
+        write(io,'(a)')'@    string def "\1p\0 = '//trim(i2s(ngrid))//'"'
         do igrid = 1, ngrid
           u = grid_x(igrid)*inv_sqrt_omega - ucentre
-          if (igrid==1) write(io,*) u-1.d0, dble(ngrid-2)
           write(6,*)'  u_'//trim(i2s(igrid))//', P_'//trim(i2s(igrid))//&
              &' = ', u, grid_P(igrid)
-          write(io,*) u - 0.1d0, dble(ngrid-2)
-          write(io,*) u - 0.1d0, dble(ngrid-2) + grid_P(igrid)
-          write(io,*) u + 0.1d0, dble(ngrid-2) + grid_P(igrid)
-          write(io,*) u + 0.1d0, dble(ngrid-2)
-          if (igrid==ngrid) write(io,*) u+1.d0, dble(ngrid-2)
+          write(io,'(a)')'@g1.s'//trim(i2s(j))//' line color 4'
+          write(io,'(a)')'@g1.s'//trim(i2s(j))//' linewidth 2'
+          write(io,'(a)')'@target G1.S'//trim(i2s(j))
+          write(io,'(a)')'@type xy'
+          write(io,*) u - du, dble(ngrid)
+          write(io,*) u - du, dble(ngrid) + grid_P(igrid)*Pscale
+          write(io,*) u + du, dble(ngrid) + grid_P(igrid)*Pscale
+          write(io,*) u + du, dble(ngrid)
+          write(io,'(a)')'&'
+          j=j+1
         enddo ! igrid
-        write(io,'(a)')'&'
         ! Evaluate expectation value of potential energy using this grid.
         do igrid = 1, ngrid
           x = grid_x(igrid)
@@ -312,11 +520,15 @@ CONTAINS
           call eval_test_functions (u, fu)
           fvarexpval(:,ngrid) = fvarexpval(:,ngrid) + &
              &grid_P(igrid)*(fu(:)-fexpval(:,ngrid))**2
+          call eval_test_functions (-u, fmu)
+          fu = 0.5d0*(fu+fmu)
+          fstarvarexpval(:,ngrid) = fstarvarexpval(:,ngrid) + &
+             &grid_P(igrid)*(fu(:)-fexpval(:,ngrid))**2
         enddo ! igrid
         write(6,*)'  Integration tests:'
         do i = 1, NFUNCTION
           write(6,*)'    <f_'//trim(i2s(i))//'> = ', fexpval(i,ngrid), &
-             &fvarexpval(i,ngrid)
+             &fvarexpval(i,ngrid), fstarvarexpval(i,ngrid)
         enddo ! i
       endif
       write(6,*)
@@ -328,10 +540,90 @@ CONTAINS
     ! Plot relative grid integration results.
     open(unit=io,file='quadrature_int.agr',status='replace',iostat=ierr)
     if (ierr/=0) call quit()
+    write(io,'(a)')'@page size 792, 612'
+    write(io,'(a)')'@map font 0 to "Times-Roman", "Times-Roman"'
+    write(io,'(a)')'@map font 1 to "Times-Italic", "Times-Italic"'
+    write(io,'(a)')'@map font 2 to "Times-Bold", "Times-Bold"'
+    write(io,'(a)')'@default linewidth 2.0'
+    write(io,'(a)')'@default font 0'
+    write(io,'(a)')'@default char size 1.5'
+    write(io,'(a)')'@page background fill off'
+    write(io,'(a)')'@autoscale onread none'
+    write(io,'(a)')'@g0 on'
+    write(io,'(a)')'@with g0'
+    write(io,'(a)')'@    world 1.5, 0, 10.5, 1.5'
+    write(io,'(a)')'@    view 0.20, 0.56, 1.20, 0.90'
+    write(io,'(a)')'@    frame linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major size 1.0'
+    write(io,'(a)')'@    xaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    xaxis tick minor size 0.5'
+    write(io,'(a)')'@    xaxis tick major 2'
+    write(io,'(a)')'@    xaxis tick minor ticks 1'
+    write(io,'(a)')'@    xaxis ticklabel off'
+    write(io,'(a)')'@    yaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    yaxis tick major size 1.0'
+    write(io,'(a)')'@    yaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    yaxis tick minor size 0.5'
+    write(io,'(a)')'@    yaxis tick major 1.00'
+    write(io,'(a)')'@    yaxis tick minor ticks 4'
+    write(io,'(a)')'@    xaxis label ""'
+    write(io,'(a)')'@    xaxis label char size 1.75'
+    write(io,'(a)')'@    yaxis label "E\s\v{0.3}\x\l{0.25}y\l{-0.25}\f{}&
+       &\s\1p\0\N\s\v{0.3}\S\v{-0.3}\h{-0.3}2\N\N[\1A\0]\h{0.2}/\h{0.2}&
+       &E\s\v{0.3}\x\l{0.25}f\l{-0.25}\f{}\S\v{-0.2}2\N\N[\1A\0]"'
+    write(io,'(a)')'@    yaxis label char size 1.75'
+    write(char1,*) dble(MAX_NGRID-1)
+    char1 = adjustl(char1)
+    write(char2,*) -0.4d0+0.6d0*(1.7d0-(-0.4d0))
+    char2 = adjustl(char2)
+    write(io,'(a)')'@    legend box linewidth 2.0'
+    write(io,'(a)')'@    legend loctype world'
+    write(io,'(a)')'@    legend '//trim(char1)//', '//trim(char2)
+    write(io,'(a)')'@    legend char size 1.25'
+    write(io,'(a)')'@    legend length 4'
+    write(io,'(a)')'@g1 on'
+    write(io,'(a)')'@with g1'
+    write(io,'(a)')'@    world 1.5, 0, 10.5, 1.5'
+    write(io,'(a)')'@    view 0.20, 0.20, 1.20, 0.54'
+    write(io,'(a)')'@    frame linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    xaxis tick major size 1.0'
+    write(io,'(a)')'@    xaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    xaxis tick minor size 0.5'
+    write(io,'(a)')'@    xaxis tick major 2'
+    write(io,'(a)')'@    xaxis tick minor ticks 1'
+    write(io,'(a)')'@    yaxis tick major linewidth 3.0'
+    write(io,'(a)')'@    yaxis tick major size 1.0'
+    write(io,'(a)')'@    yaxis tick minor linewidth 2.0'
+    write(io,'(a)')'@    yaxis tick minor size 0.5'
+    write(io,'(a)')'@    yaxis tick major 1.00'
+    write(io,'(a)')'@    yaxis tick minor ticks 4'
+    write(io,'(a)')'@    xaxis label "\1p\0"'
+    write(io,'(a)')'@    xaxis label char size 1.75'
+    write(io,'(a)')'@    yaxis label "var\s\v{0.3}\x\l{0.25}y\l{-0.25}\f{}&
+       &\s\1p\0\N\s\v{0.3}\S\v{-0.3}\h{-0.3}2\N\N[\1A\0]\h{0.2}/\h{0.2}&
+       &\var\s\v{0.3}\x\l{0.25}f\l{-0.25}\f{}\S\v{-0.2}2\N\N[\1A\0]"'
+    write(io,'(a)')'@    yaxis label char size 1.75'
     do i = 1, NFUNCTION
+      write(io,'(a)')'@g0.s'//trim(i2s(i-1))//' linewidth 2'
+      write(io,'(a)')'@g0.s'//trim(i2s(i-1))//' linestyle '//trim(i2s(i))
+      write(io,'(a)')'@g0.s'//trim(i2s(i-1))//' legend "\1A\0\s\v{0.3}'//&
+         &trim(i2s(i))//'\N"'
+      write(io,'(a)')'@target G0.S'//trim(i2s(i-1))
+      write(io,'(a)')'@type xy'
       do ngrid = 2, MAX_NGRID
         if (grid_failed(ngrid)) cycle
-        write(io,*) ngrid, abs(fexpval(i,ngrid)-fint(i))/abs(fexpval(i,ngrid))
+        write(io,*) ngrid, fexpval(i,ngrid)/fint(i)
+      enddo ! ngrid
+      write(io,'(a)') '&'
+      write(io,'(a)')'@g1.s'//trim(i2s(i-1))//' linewidth 2'
+      write(io,'(a)')'@g1.s'//trim(i2s(i-1))//' linestyle '//trim(i2s(i))
+      write(io,'(a)')'@target G1.S'//trim(i2s(i-1))
+      write(io,'(a)')'@type xy'
+      do ngrid = 2, MAX_NGRID
+        if (grid_failed(ngrid)) cycle
+        write(io,*) ngrid, fvarexpval(i,ngrid)/fvar(i)
       enddo ! ngrid
       write(io,'(a)') '&'
     enddo ! i
@@ -1228,10 +1520,10 @@ CONTAINS
     IMPLICIT NONE
     DOUBLE PRECISION, INTENT(in) :: u
     DOUBLE PRECISION, INTENT(inout) :: f(4)
-    f(1) = -u**2+u**4
-    f(2) = -u**3+u**6
-    f(3) = (u**2+abs(u**3))/(1.d0+u**2)
-    f(4) = abs(u)
+    f(1) = u**2
+    f(2) = 0.5d0*u-u**2+u**4
+    f(3) = 2.d0*u**2-2.8d0*u**4+u**6
+    f(4) = 2.d0*u**2/(0.5d0+abs(u))
   END SUBROUTINE eval_test_functions
 
 
