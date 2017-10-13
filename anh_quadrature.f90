@@ -1057,7 +1057,7 @@ CONTAINS
         f1 = eval_cdf (norder, orbcoeff, x1)
         dx = dx*1.5d0
       enddo
-    elseif (f1<p) then
+    elseif (f2<p) then
       do while (f2<p)
         x1 = x2
         f1 = f2
