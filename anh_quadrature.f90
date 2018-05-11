@@ -10,6 +10,9 @@ PROGRAM anh_quadrature
   ! PLR 08.2017                                                     !
   !-----------------------------------------------------------------!
   IMPLICIT NONE
+  ! HACK - energy scale (global variable)
+  DOUBLE PRECISION ESCALE, INV_ESCALE
+  DOUBLE PRECISION USCALE, INV_USCALE
 
   call main()
 
@@ -64,10 +67,27 @@ CONTAINS
     LOGICAL int_converged(NFUNCTION)
     INTEGER, PARAMETER :: io=10
 
+    ! Get energy scale.
+    write(6,*) 'Energy units relative to au (e.g., 1e-3 to work in mHa):'
+    read(5,'(a)',iostat=ierr) line
+    if (ierr/=0) call quit()
+    read(line,*,iostat=ierr) ESCALE
+    if (ierr/=0) ESCALE=1.d0
+    INV_ESCALE = 1.d0/ESCALE
+
+    ! Get u scale.
+    write(6,*) 'Distance units relative to au (e.g., 0.529 to work in &
+       &Angstrom):'
+    read(5,'(a)',iostat=ierr) line
+    if (ierr/=0) call quit()
+    read(line,*,iostat=ierr) USCALE
+    if (ierr/=0) USCALE=1.d0
+    INV_USCALE = 1.d0/USCALE
+
     ! Get V coefficients and norder.
     write(6,*) 'Enter coefficients c_k of expansion of V(u) in natural powers,'
     write(6,*)
-    write(6,*) '  V(u) = sum_k=0^n c_k u^k       (a.u., in one line):'
+    write(6,*) '  V(u) = sum_k=0^n c_k u^k             (in one line):'
     write(6,*)
     read(5,'(a)',iostat=ierr) line
     if (ierr/=0) call quit()
@@ -91,8 +111,7 @@ CONTAINS
     ! and energies are e = E/omega, where omega is optimized so as to yield
     ! the best solution at a fixed expansion order.  Also, we shift the
     ! potential self-consistently so that <x> = 0 at this expansion order.
-    write(6,*) 'Enter ucentre and omega (a.u.) [single line; empty to &
-       &autodetect]:'
+    write(6,*) 'Enter ucentre and omega [single line; empty to autodetect]:'
     read(5,'(a)',iostat=ierr) line
     if (ierr/=0) call quit()
     if (len_trim(line)==0) then
@@ -105,7 +124,7 @@ CONTAINS
     endif
     inv_sqrt_omega = 1.d0/sqrt(omega)
     write(6,*) 'Centre          = ', ucentre
-    write(6,*) 'Omega (a.u.)    = ', omega
+    write(6,*) 'Omega           = ', omega
 
     ! Get internal representation of V in normalized Hermite polynomials.
     allocate(vcoeff(0:norder_v))
@@ -216,7 +235,7 @@ CONTAINS
 
     ! Report.
     write(6,*) 'Expansion order = '//trim(i2s(norder))
-    write(6,*) 'E0 (a.u.)       = ', e0*omega
+    write(6,*) 'E0              = ', e0*omega
     write(6,*) 'Virial ratio    = ', vratio
     write(6,*)
 
@@ -657,7 +676,8 @@ CONTAINS
     ! * Scaling a potential V(u) by a multiplicative constant results in the
     !   same dimensionless potential v(x).
     ! * omega is the frequency for a harmonic potential.
-    omega_init = sqrt(2.d0)*vcoeff_nat(norder_v)**(2.d0/dble(norder_v+2))
+    omega_init = sqrt(2.d0)*ESCALE*&
+       &vcoeff_nat(norder_v)**(2.d0/dble(norder_v+2))
 
     ! Initialize ucentre.
     ucentre = 0.d0
@@ -694,7 +714,7 @@ CONTAINS
         call transform_potential (norder_v, vcoeff_nat, ucentre, xv, vcoeff)
         call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
         if (MINIMIZE_E) then
-          fv = e0*xv
+          fv = e0*xv*ESCALE
         else
           fv = abs(vratio-1.d0)
         endif
@@ -709,7 +729,7 @@ CONTAINS
           call transform_potential (norder_v, vcoeff_nat, ucentre, xu, vcoeff)
           call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, vratio)
           if (MINIMIZE_E) then
-            fu = e0*xu
+            fu = e0*xu*ESCALE
           else
             fu = abs(vratio-1.d0)
           endif
@@ -729,7 +749,7 @@ CONTAINS
             call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, &
                &vratio)
             if (MINIMIZE_E) then
-              fw = e0*xw
+              fw = e0*xw*ESCALE
             else
               fw = abs(vratio-1.d0)
             endif
@@ -750,7 +770,7 @@ CONTAINS
           call get_ground_state (norder, norder_v, vcoeff, e0, orbcoeff, &
              &vratio)
           if (MINIMIZE_E) then
-            f = e0*x
+            f = e0*x*ESCALE
           else
             f = abs(vratio-1.d0)
           endif
@@ -894,10 +914,11 @@ CONTAINS
     ! eigenfunctions.
     do i = 0, norder
       hmatrix(i,i) = eval_comb_Gamma (norder_v, i, i, vcoeff, log_fact) + &
-         &dble(i)+0.25d0 - fourth_root_pi_over_sqrt8*eval_Gamma(i,i,2,log_fact)
+         &INV_ESCALE * ( dble(i)+0.25d0 - &
+         &fourth_root_pi_over_sqrt8*eval_Gamma(i,i,2,log_fact) )
       do j = i+1, norder
         hmatrix(i,j) = eval_comb_Gamma (norder_v, i, j, vcoeff, log_fact) - &
-           &fourth_root_pi_over_sqrt8*eval_Gamma(i,j,2,log_fact)
+           &fourth_root_pi_over_sqrt8*eval_Gamma(i,j,2,log_fact)*INV_ESCALE
         hmatrix(j,i) = hmatrix(i,j)
       enddo ! j
     enddo ! i
@@ -971,7 +992,7 @@ CONTAINS
         t_expval = t_expval + 2.d0*t2*cmatrix(i,0)*cmatrix(j,0)
       enddo ! j
     enddo ! i
-    vratio = 2.d0*t_expval/xdv_expval
+    vratio = 2.d0*t_expval*INV_ESCALE/xdv_expval
 
     ! Return ground-state components.
     ! FIXME - if ground state is degenerate, how do we choose which
