@@ -1,25 +1,7 @@
 #!/bin/bash
 
-# Select Fortran and C compilers based on hostname.
-ccopts=""
-case "$(hostname 2>/dev/null)" in
-allogin*)
-  . /usr/share/modules/init/bash
-  module load ifort mpi.intel
-  cc=mpiicc
-  f90=mpiifort ;;
-vortex*)
-  . /etc/profile.d/modules.sh
-  module load intel impi
-  cc=mpiicc
-  f90=mpiifort ;;
-pc*.tcm.*)
-  cc=gcc
-  f90=gfortran ;;
-*)
-  cc=mpicc
-  f90=mpif90 ;;
-esac
+# Select Fortran compiler.
+f90=gfortran
 
 # Choose compiler options.
 case "$f90" in
